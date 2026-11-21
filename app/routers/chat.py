@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
     description=(
         "接收用户消息，经过多轮 Function Calling 推理后返回助手回复。"
         "同一 session_id 的请求会共享对话历史（最近 6 轮）。"
+        "若本轮调用了知识库检索且有命中，citations 字段返回溯源条款来源。"
     ),
 )
 def chat(request: ChatRequest) -> ChatResponse:
@@ -37,7 +38,8 @@ def chat(request: ChatRequest) -> ChatResponse:
     )
 
     try:
-        reply, tools_called, latency_ms = run_agent(
+        # run_agent 现在返回 4 元组（第三阶段新增 citations）
+        reply, tools_called, latency_ms, citations = run_agent(
             session_id=request.session_id,
             user_message=request.message,
         )
@@ -57,4 +59,5 @@ def chat(request: ChatRequest) -> ChatResponse:
         reply=reply,
         tools_called=tools_called,
         latency_ms=latency_ms,
+        citations=citations,
     )

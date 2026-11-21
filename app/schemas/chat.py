@@ -35,3 +35,11 @@ class ChatResponse(BaseModel):
         description="本轮实际调用的工具名列表，纯问答时为空列表",
     )
     latency_ms: int = Field(..., description="本次请求端到端耗时，单位毫秒")
+    citations: List[str] = Field(
+        default_factory=list,
+        description=(
+            "本轮命中知识库条款的去重来源列表，格式为 '文件名#章节名'，"
+            "如 'return_policy.md#耳机类退货规则'。"
+            "未调用知识库或无命中时为空列表。"
+        ),
+    )

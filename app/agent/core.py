@@ -7,6 +7,7 @@ Agent 核心调度模块：实现多轮对话 + Function Calling 循环。
   - 从 chat_logs 加载最近 6 轮历史作为上下文
   - 调用 DeepSeek（OpenAI 兼容接口）进行推理
   - 根据 tool_calls 分发工具执行，回填 tool 角色消息，循环直到自然语言回复
+  - 解析 search_knowledge_base 工具结果，提取保序去重的 citations 溯源引用
   - 统计耗时，将本轮对话持久化到 chat_logs 表
 """
 
@@ -50,7 +51,7 @@ _client = OpenAI(
 )
 
 # ---------------------------------------------------------------------------
-# System Prompt：严格中文客服角色约束
+# System Prompt：严格中文客服角色约束（含 RAG 强制检索规则）
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """你是"小智"，一名专业、友善的企业智能售后客服助理。
@@ -62,14 +63,18 @@ _SYSTEM_PROMPT = """你是"小智"，一名专业、友善的企业智能售后�
 4. **结果解读**：收到工具返回的 JSON 后，将关键信息翻译为自然、易懂的中文回复给用户，不要直接暴露 JSON 原文。
 5. **工具错误处理**：若工具返回包含 "error" 字段，向用户说明情况并引导其提供正确信息，不要重复调用相同参数。
 6. **语气风格**：专业、简洁、有温度，使用礼貌敬语，避免过度啰嗦。
+7. **知识库优先与严禁虚假检索声明**：
+   - 凡是用户询问任何店铺规则、政策、服务权益、活动、分期/支付、换购、退换货条件、拆封退货、运费承担、质保期限、保修流程、发货时效、退款到账时间等问题，**必须先实际调用 search_knowledge_base 工具检索，严禁凭借自身记忆直接作答**。
+   - 检索后，严格依据工具返回的条款原文作答，并明确指出依据的具体条款（来源文件与章节）。
+   - **绝对红线**：严禁在**未实际调用 search_knowledge_base** 的情况下，在回复中擅自声称"我检索了知识库"、"知识库中暂未找到"或"经查询知识库无此政策"等虚假表述！只有在确实发起了工具调用且返回结果为空或无匹配时，才可如实告知"本店知识库暂未收录相关说明"，并引导用户转接人工客服处理。
 
 【能力边界】
-- 你只处理售后相关问题（查订单、查工单、退换货、物流催单、转人工）。
+- 你只处理售后相关问题（查订单、查工单、退换货、物流催单、转人工、政策咨询）。
 - 对于无关话题，礼貌说明你的职责范围并引导用户回到售后问题。
 """
 
 # Function Calling 最大循环步数，防止模型异常导致死循环
-_MAX_STEPS = 5
+_MAX_STEPS = 6  # 知识库检索可能多消耗一步，从 5 调整到 6
 
 # 历史消息条数限制（最近 12 条 = 6 轮对话）
 _HISTORY_LIMIT = 12
@@ -144,10 +149,52 @@ def _save_message(
 
 
 # ---------------------------------------------------------------------------
+# citations 提取辅助函数
+# ---------------------------------------------------------------------------
+
+def _extract_citations(tool_name: str, tool_result: str) -> list[str]:
+    """
+    从 search_knowledge_base 工具的返回 JSON 中提取溯源引用列表。
+    格式：["文件名#章节名", ...]，保序去重（先出现的优先）。
+
+    之所以在此直接解析结构化 JSON 而非依赖大模型在回复文本中输出：
+    - 结构化解析可靠性 100%，不受大模型措辞影响
+    - 不需要在 Prompt 中要求大模型格式化输出，减少 Prompt 复杂度
+    """
+    # 仅对知识库检索工具提取 citations，其他工具忽略
+    if tool_name != "search_knowledge_base":
+        return []
+
+    try:
+        data = json.loads(tool_result)
+    except json.JSONDecodeError:
+        # 工具返回格式异常（如包含 error 字段的非列表 JSON），直接跳过
+        return []
+
+    if not isinstance(data, list):
+        # 返回 {"error": ...} 或其他非列表结构时，无可提取的 citations
+        return []
+
+    # 保序去重：用 seen set 判断重复，用 list 保序
+    seen: set[str] = set()
+    citations: list[str] = []
+    for chunk in data:
+        source = chunk.get("source", "")
+        section = chunk.get("section", "")
+        if source and section:
+            key = f"{source}#{section}"
+            if key not in seen:
+                seen.add(key)
+                citations.append(key)
+
+    return citations
+
+
+# ---------------------------------------------------------------------------
 # 核心 Agent 入口
 # ---------------------------------------------------------------------------
 
-def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int]:
+def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int, list[str]]:
     """
     执行一轮完整的 Agent 推理（含多步 Function Calling 循环）。
 
@@ -156,10 +203,11 @@ def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int]:
       2. 进入循环（最多 _MAX_STEPS 步）：
          a. 调用大模型
          b. 若返回 tool_calls → 执行工具 → 回填 tool 角色消息 → 继续下一轮
+            如果工具是 search_knowledge_base，同步解析返回结果提取 citations
          c. 若 finish_reason == "stop" → 输出最终回复，退出循环
       3. 计算端到端耗时
       4. 将用户输入和最终回复持久化到 chat_logs
-      5. 返回 (reply, tools_called, latency_ms)
+      5. 返回 (reply, tools_called, latency_ms, citations)
 
     参数：
       session_id   - 会话唯一标识，用于读取/写入历史记录
@@ -169,6 +217,7 @@ def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int]:
       reply        - 助手最终自然语言回复
       tools_called - 本轮实际调用的工具名列表（可能为空）
       latency_ms   - 端到端耗时（毫秒）
+      citations    - 本轮命中知识库条款的去重来源列表（格式: "文件名#章节名"）
     """
     start_time = time.monotonic()
 
@@ -179,6 +228,7 @@ def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int]:
     messages.append({"role": "user", "content": user_message})
 
     tools_called: list[str] = []  # 记录本轮调用的工具名
+    citations: list[str] = []     # 记录知识库命中条款来源（保序去重）
     final_reply: str | None = None
 
     logger.info(
@@ -227,6 +277,13 @@ def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int]:
                 tool_result = execute_tool(tool_name, arguments)
                 tools_called.append(tool_name)
 
+                # 若工具为知识库检索，直接解析结构化结果提取 citations（不依赖大模型输出）
+                # 保序去重：已在 _extract_citations 内部处理，这里做跨调用去重
+                new_citations = _extract_citations(tool_name, tool_result)
+                for c in new_citations:
+                    if c not in citations:
+                        citations.append(c)
+
                 # 将工具返回结果以 tool 角色追加（DeepSeek 兼容 OpenAI tool 消息格式）
                 messages.append({
                     "role": "tool",
@@ -274,8 +331,8 @@ def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int]:
     )
 
     logger.info(
-        "run_agent 完成 session_id=%s tools_called=%s latency_ms=%d",
-        session_id, tools_called, latency_ms,
+        "run_agent 完成 session_id=%s tools_called=%s citations=%s latency_ms=%d",
+        session_id, tools_called, citations, latency_ms,
     )
 
-    return final_reply, tools_called, latency_ms
+    return final_reply, tools_called, latency_ms, citations

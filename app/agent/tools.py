@@ -3,7 +3,8 @@ app/agent/tools.py
 
 供大模型 Function Calling 使用的底层工具函数模块。
 包含：
-  - 3 个业务工具函数（query_order / create_after_sales_ticket / query_tickets）
+  - 4 个业务工具函数（query_order / create_after_sales_ticket /
+    query_tickets / search_knowledge_base）
   - OpenAI Function Calling 标准格式的 TOOLS_SCHEMA
   - 安全工具分发器 execute_tool（捕获所有边界异常，永不直接崩溃）
 """
@@ -11,10 +12,12 @@ app/agent/tools.py
 import json
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from app.db.database import get_db_connection
+# 知识库检索器（模块级单例，首次调用时初始化）
+from app.agent.knowledge import get_retriever
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +158,35 @@ def query_tickets(order_id: str) -> str:
     return json.dumps({"order_id": order_id, "tickets": tickets, "count": len(tickets)}, ensure_ascii=False)
 
 
+def search_knowledge_base(query: str) -> str:
+    """
+    检索本地售后规则知识库，返回命中条款的 JSON 列表。
+    每条包含：source（来源文件）、section（章节）、content（条款原文）、score（相关性分）。
+    若无命中返回空列表 JSON，不报错，让大模型诚实告知用户知识库未覆盖该问题。
+
+    边界处理：
+      - 检索器未初始化（知识库目录为空）→ 返回空列表 JSON
+      - query 为空或全空白 → 返回空列表 JSON（短路，避免无意义检索）
+      - 检索过程异常 → 记录日志，返回 error JSON（大模型兜底处理）
+    """
+    if not query or not query.strip():
+        return json.dumps([], ensure_ascii=False)
+
+    try:
+        retriever = get_retriever()
+        # top_k=3：每次最多返回 3 条最相关条款，避免 context 过长
+        results = retriever.search(query.strip(), top_k=3)
+        logger.info(
+            "search_knowledge_base: query='%s' 命中 %d 条",
+            query[:50], len(results),
+        )
+        return json.dumps(results, ensure_ascii=False)
+    except Exception as e:
+        # 检索异常不应中断 Agent 对话，记录日志后返回可读错误
+        logger.error("search_knowledge_base 检索异常 query='%s': %s", query[:50], e)
+        return json.dumps({"error": f"知识库检索失败：{str(e)}"}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # OpenAI Function Calling 标准 TOOLS_SCHEMA
 # ---------------------------------------------------------------------------
@@ -235,6 +267,31 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_knowledge_base",
+            "description": (
+                "检索本店本地售后规则与店铺政策知识库。只要涉及核实任何店铺政策、售后规则、"
+                "退换货条件（如拆封退货/运费承担/换新）、保修质保政策、发货与物流时效、"
+                "退款到账、支付分期规则、活动或服务支持范围等问题，都必须调用此工具进行查询。"
+                "严禁凭借预训练知识自行臆测或回答具体的政策条款与数字边界。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "用户的政策咨询问题，尽量保留关键词，如"
+                            "'耳机拆封后能否退货'、'退款多久到账'、'质保期多长'等"
+                        ),
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 # 工具名 → 函数 映射表，用于分发器路由
@@ -242,6 +299,7 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "query_order": query_order,
     "create_after_sales_ticket": create_after_sales_ticket,
     "query_tickets": query_tickets,
+    "search_knowledge_base": search_knowledge_base,
 }
 
 
