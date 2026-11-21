@@ -72,7 +72,7 @@ def init_db() -> None:
         order_id TEXT NOT NULL,
         issue_type TEXT NOT NULL,
         reason TEXT,
-        status TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT '待处理',
         summary TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (order_id) REFERENCES orders (order_id)
