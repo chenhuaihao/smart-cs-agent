@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from app.db.database import init_db
 from app.routers.orders import router as orders_router
 from app.routers.tickets import router as tickets_router
+from app.routers.chat import router as chat_router
 
 # 配置全局日志格式
 logging.basicConfig(
@@ -35,9 +36,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 挂载订单与工单业务路由
+# 挂载订单、工单与对话业务路由
 app.include_router(orders_router)
 app.include_router(tickets_router)
+app.include_router(chat_router)
 
 
 @app.get("/health", summary="健康检查接口", tags=["system"])
