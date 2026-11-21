@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart CS Agent · 智能售后工作台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0fdfa',
+              100: '#ccfbf1',
+              200: '#99f6e4',
+              600: '#0d9488',
+              700: '#0f766e',
+              800: '#115e59',
+              900: '#134e4a',
+            }
+          },
+          fontFamily: {
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"Inter"', '"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"', 'sans-serif'],
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', '"Liberation Mono"', 'monospace'],
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    html, body {
+      height: 100%;
+      background-color: #f8fafc;
+      color: #18181b;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* 细腻滚动条 */
+    .custom-scroll::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scroll::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .custom-scroll::-webkit-scrollbar-thumb {
+      background-color: #d4d4d8;
+      border-radius: 9999px;
+    }
+    .custom-scroll::-webkit-scrollbar-thumb:hover {
+      background-color: #a1a1aa;
+    }
+
+    /* Markdown 渲染样式（覆盖 Tailwind Preflight 重置） */
+    .markdown-body {
+      font-size: 0.9375rem;
+      line-height: 1.65;
+      color: #27272a;
+      word-break: break-word;
+    }
+    .markdown-body > *:first-child {
+      margin-top: 0;
+    }
+    .markdown-body > *:last-child {
+      margin-bottom: 0;
+    }
+    .markdown-body p {
+      margin: 0.55rem 0;
+    }
+    .markdown-body strong {
+      font-weight: 600;
+      color: #18181b;
+    }
+    .markdown-body ul {
+      list-style-type: disc;
+      padding-left: 1.35rem;
+      margin: 0.55rem 0;
+    }
+    .markdown-body ol {
+      list-style-type: decimal;
+      padding-left: 1.35rem;
+      margin: 0.55rem 0;
+    }
+    .markdown-body li {
+      margin: 0.25rem 0;
+    }
+    .markdown-body li > ul,
+    .markdown-body li > ol {
+      margin: 0.25rem 0;
+    }
+    .markdown-body h1,
+    .markdown-body h2,
+    .markdown-body h3,
+    .markdown-body h4 {
+      font-weight: 600;
+      color: #18181b;
+      margin: 0.85rem 0 0.4rem;
+      line-height: 1.4;
+    }
+    .markdown-body h1 { font-size: 1.125rem; }
+    .markdown-body h2 { font-size: 1.05rem; }
+    .markdown-body h3 { font-size: 0.975rem; }
+    .markdown-body code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.825rem;
+      background-color: #f4f4f5;
+      color: #0f766e;
+      padding: 0.12rem 0.35rem;
+      border-radius: 0.25rem;
+      border: 1px solid #e4e4e7;
+    }
+    .markdown-body pre {
+      background-color: #18181b;
+      color: #f4f4f5;
+      padding: 0.75rem 0.9rem;
+      border-radius: 0.5rem;
+      overflow-x: auto;
+      margin: 0.65rem 0;
+    }
+    .markdown-body pre code {
+      background-color: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+    .markdown-body blockquote {
+      border-left: 3px solid #0f766e;
+      background-color: #f4f4f5;
+      padding: 0.45rem 0.75rem;
+      margin: 0.6rem 0;
+      color: #3f3f46;
+      border-radius: 0 0.375rem 0.375rem 0;
+    }
+    .markdown-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0.65rem 0;
+      font-size: 0.85rem;
+    }
+    .markdown-body th,
+    .markdown-body td {
+      border: 1px solid #e4e4e7;
+      padding: 0.45rem 0.65rem;
+      text-align: left;
+    }
+    .markdown-body th {
+      background-color: #fafafa;
+      font-weight: 600;
+      color: #27272a;
+    }
+    .markdown-body a {
+      color: #0f766e;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .markdown-body hr {
+      border: none;
+      border-top: 1px solid #e4e4e7;
+      margin: 0.75rem 0;
+    }
+
+    /* 柔和思考加载点动画 */
+    @keyframes dotPulse {
+      0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+      40% { opacity: 1; transform: scale(1); }
+    }
+    .loading-dot {
+      animation: dotPulse 1.3s infinite ease-in-out both;
+    }
+    .loading-dot:nth-child(2) { animation-delay: 0.16s; }
+    .loading-dot:nth-child(3) { animation-delay: 0.32s; }
+
+    /* 新工单高亮过渡 */
+    @keyframes ticketFlash {
+      0% { background-color: #f0fdfa; border-color: #5eead4; }
+      100% { background-color: #ffffff; border-color: #e4e4e7; }
+    }
+    .ticket-new {
+      animation: ticketFlash 2.2s ease-out;
+    }
+  </style>
+</head>
+<body class="h-screen overflow-hidden flex flex-col bg-slate-50 text-zinc-900">
+
+  <!-- 主工作台双栏容器 -->
+  <div class="flex-1 flex min-h-0 relative max-w-[1680px] w-full mx-auto">
+
+    <!-- ==================== 左侧主对话区（~67%） ==================== -->
+    <main class="flex-1 lg:w-[67%] flex flex-col min-w-0 bg-white lg:border-r border-zinc-200">
+
+      <!-- 顶部导航栏 -->
+      <header class="h-14 shrink-0 px-4 sm:px-6 border-b border-zinc-200 flex items-center justify-between gap-3 bg-white">
+        <div class="flex items-center gap-3 min-w-0">
+          <!-- 克制的墨绿极简图标 -->
+          <div class="w-8 h-8 rounded-lg bg-brand-700 text-white flex items-center justify-center shrink-0 shadow-xs">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              <path d="M8 10h.01"></path>
+              <path d="M12 10h.01"></path>
+              <path d="M16 10h.01"></path>
+            </svg>
+          </div>
+          <div class="min-w-0">
+            <div class="flex items-center gap-2">
+              <h1 class="text-sm sm:text-[15px] font-semibold text-zinc-900 tracking-tight truncate">
+                Smart CS Agent 智能售后工作台
+              </h1>
+              <span class="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-brand-50 text-brand-700 border border-brand-200">
+                <span class="w-1.5 h-1.5 rounded-full bg-brand-600"></span>
+                在线
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2 shrink-0">
+          <!-- Session ID 标签（点击可复制） -->
+          <button
+            id="sessionIdBtn"
+            type="button"
+            title="点击复制当前 Session ID"
+            class="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-xs font-mono text-zinc-600 transition-colors"
+          >
+            <span class="text-zinc-400 font-sans">SID</span>
+            <span id="sessionIdText" class="text-zinc-700 font-medium">web_--------</span>
+          </button>
+
+          <!-- 新建会话按钮 -->
+          <button
+            id="newSessionBtn"
+            type="button"
+            class="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 active:bg-zinc-100 text-xs font-medium text-zinc-700 transition-colors"
+          >
+            <svg class="w-3.5 h-3.5 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5v14M5 12h14"></path>
+            </svg>
+            <span>新建会话</span>
+          </button>
+
+          <!-- 移动端右侧面板抽屉切换按钮 -->
+          <button
+            id="mobileDrawerBtn"
+            type="button"
+            class="lg:hidden inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-xs font-medium text-zinc-700 transition-colors"
+          >
+            <svg class="w-3.5 h-3.5 text-brand-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+              <path d="M15 3v18"></path>
+            </svg>
+            <span>看板</span>
+            <span id="mobileTicketBadge" class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-mono bg-brand-700 text-white">0</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- 移动端 Session ID 副栏 -->
+      <div class="sm:hidden px-4 py-1.5 bg-zinc-50 border-b border-zinc-200 flex items-center justify-between text-[11px] text-zinc-500">
+        <span>当前会话：<code id="mobileSessionIdText" class="font-mono text-zinc-700">web_--------</code></span>
+        <span class="inline-flex items-center gap-1 text-brand-700">
+          <span class="w-1.5 h-1.5 rounded-full bg-brand-600"></span>
+          服务就绪
+        </span>
+      </div>
+
+      <!-- 对话消息滚动区 -->
+      <div id="chatScrollArea" class="flex-1 overflow-y-auto custom-scroll px-4 sm:px-6 py-3 sm:py-4 bg-slate-50/60">
+        <div id="chatContainer" class="max-w-3xl mx-auto space-y-5">
+
+          <!-- 空状态欢迎卡片 -->
+          <section id="emptyState" class="py-2 sm:py-3">
+            <div class="bg-white border border-zinc-200 rounded-xl p-4 sm:p-5 shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
+              <div class="flex items-start gap-3.5">
+                <div class="w-9 h-9 rounded-lg bg-brand-50 border border-brand-200 text-brand-700 flex items-center justify-center shrink-0 mt-0.5">
+                  <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                    <path d="M2 17l10 5 10-5"></path>
+                    <path d="M2 12l10 5 10-5"></path>
+                  </svg>
+                </div>
+                <div>
+                  <h2 class="text-base font-semibold text-zinc-900">欢迎使用 Smart CS Agent 售后助理</h2>
+                  <p class="mt-1 text-xs sm:text-sm text-zinc-600 leading-relaxed">
+                    我可以实时查询订单物流与保修状态、检索售后退换货政策条文，并为您自动创建售后工单。右侧面板将同步展示每轮推理耗时、工具调用轨迹与工单变化。
+                  </p>
+                </div>
+              </div>
+
+              <div class="mt-4 pt-3.5 border-t border-zinc-100">
+                <div class="text-xs font-medium text-zinc-500 mb-2 flex items-center justify-between">
+                  <span>快捷测试场景（点击直接发送）</span>
+                  <span class="font-mono text-[11px] text-zinc-400">4 presets</span>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    class="quick-prompt-btn group text-left p-2.5 sm:p-3 rounded-lg border border-zinc-200 bg-zinc-50/50 hover:bg-brand-50/60 hover:border-brand-600/40 transition-all"
+                    data-prompt="帮我查一下订单 ORD20261101 的物流状态"
+                  >
+                    <div class="flex items-center justify-between gap-2 mb-1">
+                      <span class="text-[11px] font-medium text-brand-700 bg-brand-50 border border-brand-200/80 px-1.5 py-0.5 rounded">订单物流</span>
+                      <svg class="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand-700 group-hover:translate-x-0.5 transition-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12h14M12 5l7 7-7 7"></path>
+                      </svg>
+                    </div>
+                    <p class="text-xs sm:text-[13px] text-zinc-700 leading-snug">帮我查一下订单 ORD20261101 的物流状态</p>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="quick-prompt-btn group text-left p-2.5 sm:p-3 rounded-lg border border-zinc-200 bg-zinc-50/50 hover:bg-brand-50/60 hover:border-brand-600/40 transition-all"
+                    data-prompt="耳机拆封试戴了没有质量问题能退货吗？"
+                  >
+                    <div class="flex items-center justify-between gap-2 mb-1">
+                      <span class="text-[11px] font-medium text-zinc-700 bg-zinc-100 border border-zinc-200 px-1.5 py-0.5 rounded">退货政策</span>
+                      <svg class="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand-700 group-hover:translate-x-0.5 transition-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12h14M12 5l7 7-7 7"></path>
+                      </svg>
+                    </div>
+                    <p class="text-xs sm:text-[13px] text-zinc-700 leading-snug">耳机拆封试戴了没有质量问题能退货吗？</p>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="quick-prompt-btn group text-left p-2.5 sm:p-3 rounded-lg border border-zinc-200 bg-zinc-50/50 hover:bg-brand-50/60 hover:border-brand-600/40 transition-all"
+                    data-prompt="ORD20261101 这单还在保修期吗？坏了怎么修？"
+                  >
+                    <div class="flex items-center justify-between gap-2 mb-1">
+                      <span class="text-[11px] font-medium text-zinc-700 bg-zinc-100 border border-zinc-200 px-1.5 py-0.5 rounded">保修咨询</span>
+                      <svg class="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand-700 group-hover:translate-x-0.5 transition-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12h14M12 5l7 7-7 7"></path>
+                      </svg>
+                    </div>
+                    <p class="text-xs sm:text-[13px] text-zinc-700 leading-snug">ORD20261101 这单还在保修期吗？坏了怎么修？</p>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="quick-prompt-btn group text-left p-2.5 sm:p-3 rounded-lg border border-zinc-200 bg-zinc-50/50 hover:bg-brand-50/60 hover:border-brand-600/40 transition-all"
+                    data-prompt="这耳机戴着夹头，帮我给 ORD20261101 建个退货工单"
+                  >
+                    <div class="flex items-center justify-between gap-2 mb-1">
+                      <span class="text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200/80 px-1.5 py-0.5 rounded">创建工单</span>
+                      <svg class="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand-700 group-hover:translate-x-0.5 transition-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M5 12h14M12 5l7 7-7 7"></path>
+                      </svg>
+                    </div>
+                    <p class="text-xs sm:text-[13px] text-zinc-700 leading-snug">这耳机戴着夹头，帮我给 ORD20261101 建个退货工单</p>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 动态消息流容器 -->
+          <div id="messagesList" class="space-y-5"></div>
+
+          <!-- 请求中状态指示器 -->
+          <div id="loadingIndicator" class="hidden">
+            <div class="flex items-start gap-3">
+              <div class="w-7 h-7 rounded-md bg-brand-700 text-white flex items-center justify-center shrink-0 mt-0.5 text-xs font-semibold">
+                CS
+              </div>
+              <div class="bg-white border border-zinc-200 rounded-xl rounded-tl-sm px-4 py-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)] inline-flex items-center gap-3">
+                <div class="flex items-center gap-1" aria-hidden="true">
+                  <span class="w-1.5 h-1.5 rounded-full bg-brand-600 loading-dot"></span>
+                  <span class="w-1.5 h-1.5 rounded-full bg-brand-600 loading-dot"></span>
+                  <span class="w-1.5 h-1.5 rounded-full bg-brand-600 loading-dot"></span>
+                </div>
+                <span class="text-xs sm:text-[13px] text-zinc-500">正在查询订单与知识库...</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- 底部输入区 -->
+      <footer class="shrink-0 bg-white border-t border-zinc-200 px-4 sm:px-6 py-3.5">
+        <div class="max-w-3xl mx-auto">
+          <div class="relative flex items-end gap-2 bg-zinc-50 border border-zinc-200 rounded-xl px-3.5 py-2.5 focus-within:bg-white focus-within:border-brand-700 focus-within:ring-2 focus-within:ring-brand-700/10 transition-all">
+            <textarea
+              id="messageInput"
+              rows="1"
+              placeholder="输入售后问题，例如查询订单、退换货规则或创建工单..."
+              class="flex-1 bg-transparent resize-none border-0 outline-none text-sm text-zinc-900 placeholder:text-zinc-400 leading-6 max-h-36 custom-scroll"
+            ></textarea>
+            <button
+              id="sendBtn"
+              type="button"
+              disabled
+              class="shrink-0 h-8 px-3.5 rounded-lg bg-brand-700 hover:bg-brand-800 disabled:bg-zinc-200 disabled:text-zinc-400 disabled:cursor-not-allowed text-white text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+            >
+              <span id="sendBtnText">发送</span>
+              <svg id="sendBtnIcon" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 2L11 13"></path>
+                <path d="M22 2L15 22L11 13L2 9L22 2Z"></path>
+              </svg>
+            </button>
+          </div>
+          <div class="mt-2 flex items-center justify-between text-[11px] text-zinc-400 px-0.5">
+            <span>Enter 发送 · Shift + Enter 换行</span>
+            <span id="inputStatusHint">POST /api/chat</span>
+          </div>
+        </div>
+      </footer>
+    </main>
+
+    <!-- 移动端抽屉遮罩 -->
+    <div
+      id="drawerBackdrop"
+      class="fixed inset-0 bg-zinc-900/30 backdrop-blur-[1px] z-30 hidden lg:hidden"
+    ></div>
+
+    <!-- ==================== 右侧实时可观测性与工单看板（~33%） ==================== -->
+    <aside
+      id="rightSidebar"
+      class="fixed lg:static inset-y-0 right-0 z-40 w-[88vw] max-w-[420px] lg:max-w-none lg:w-[33%] bg-slate-50 border-l border-zinc-200 lg:border-l-0 flex flex-col min-h-0 transform translate-x-full lg:translate-x-0 transition-transform duration-200 ease-out"
+    >
+      <!-- 移动端抽屉顶栏 -->
+      <div class="lg:hidden h-14 shrink-0 px-4 bg-white border-b border-zinc-200 flex items-center justify-between">
+        <span class="text-sm font-semibold text-zinc-900">实时追踪与工单看板</span>
+        <button
+          id="closeDrawerBtn"
+          type="button"
+          class="p-1.5 rounded-md text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
+          aria-label="关闭面板"
+        >
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 6L6 18M6 6l12 12"></path>
+          </svg>
+        </button>
+      </div>
+
+      <div class="flex-1 flex flex-col gap-3 p-3 sm:p-3.5 min-h-0 overflow-hidden">
+
+        <!-- 上方卡片：Agent 本轮推理追踪 -->
+        <section class="shrink-0 bg-white border border-zinc-200 rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.03)] overflow-hidden">
+          <div class="px-3.5 py-2 border-b border-zinc-100 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <svg class="w-4 h-4 text-brand-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+              </svg>
+              <h2 class="text-[13px] font-semibold text-zinc-900">Agent 本轮推理追踪</h2>
+            </div>
+            <span id="traceStatusBadge" class="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-100 text-zinc-500">
+              IDLE
+            </span>
+          </div>
+
+          <div class="p-3 space-y-2.5">
+            <!-- 耗时指标 -->
+            <div class="flex items-center justify-between bg-zinc-50 border border-zinc-200/80 rounded-lg px-3 py-1.5">
+              <span class="text-xs text-zinc-500">响应耗时 (latency_ms)</span>
+              <div class="flex items-baseline gap-1 font-mono">
+                <span id="traceLatency" class="text-base font-semibold text-zinc-900">--</span>
+                <span class="text-[11px] text-zinc-400">ms</span>
+              </div>
+            </div>
+
+            <!-- 调用工具列表 -->
+            <div>
+              <div class="text-xs font-medium text-zinc-500 mb-1 flex items-center justify-between">
+                <span>调用工具 (tools_called)</span>
+                <span id="traceToolsCount" class="font-mono text-[11px] text-zinc-400">0</span>
+              </div>
+              <div id="traceToolsContainer" class="flex flex-wrap gap-1.5 min-h-[22px]">
+                <span class="text-xs text-zinc-400">等待发起对话...</span>
+              </div>
+            </div>
+
+            <!-- 命中知识库条文 -->
+            <div>
+              <div class="text-xs font-medium text-zinc-500 mb-1 flex items-center justify-between">
+                <span>知识库引用 (citations)</span>
+                <span id="traceCitationsCount" class="font-mono text-[11px] text-zinc-400">0</span>
+              </div>
+              <div id="traceCitationsContainer" class="space-y-1 max-h-24 overflow-y-auto custom-scroll">
+                <div class="text-xs text-zinc-400">暂无命中的知识库条文</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 下方卡片：实时售后工单看板 -->
+        <section class="flex-1 min-h-0 flex flex-col bg-white border border-zinc-200 rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.03)] overflow-hidden">
+          <div class="shrink-0 px-3.5 py-2 border-b border-zinc-100 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 min-w-0">
+              <svg class="w-4 h-4 text-brand-700 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="16" y1="13" x2="8" y2="13"></line>
+                <line x1="16" y1="17" x2="8" y2="17"></line>
+              </svg>
+              <h2 class="text-[13px] font-semibold text-zinc-900 truncate">实时售后工单看板</h2>
+              <span id="ticketsCountBadge" class="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-mono font-medium bg-zinc-100 text-zinc-700">
+                0
+              </span>
+            </div>
+
+            <button
+              id="refreshTicketsBtn"
+              type="button"
+              class="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 active:bg-zinc-100 text-[11px] font-medium text-zinc-600 transition-colors shrink-0"
+            >
+              <svg id="refreshTicketsIcon" class="w-3 h-3 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
+              <span>刷新</span>
+            </button>
+          </div>
+
+          <div id="ticketsListContainer" class="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 space-y-2 bg-zinc-50/40">
+            <div class="py-10 text-center text-xs text-zinc-400">正在加载工单列表...</div>
+          </div>
+
+          <div class="shrink-0 px-3.5 py-1.5 border-t border-zinc-100 bg-white flex items-center justify-between text-[11px] text-zinc-400">
+            <span>GET /api/tickets</span>
+            <span id="ticketsUpdatedAt">尚未同步</span>
+          </div>
+        </section>
+
+      </div>
+    </aside>
+  </div>
+
+  <!-- 轻量 Toast 提示 -->
+  <div
+    id="toast"
+    class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-3.5 py-2 rounded-lg bg-zinc-900 text-white text-xs font-medium shadow-lg opacity-0 pointer-events-none transition-opacity duration-200"
+  ></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // ==================== 状态管理 ====================
+      const state = {
+        sessionId: '',
+        isLoading: false,
+        isComposing: false,
+        knownTicketIds: new Set(),
+        hasLoadedTicketsOnce: false,
+        toastTimer: null
+      };
+
+      // ==================== DOM 引用 ====================
+      const els = {
+        sessionIdBtn: document.getElementById('sessionIdBtn'),
+        sessionIdText: document.getElementById('sessionIdText'),
+        mobileSessionIdText: document.getElementById('mobileSessionIdText'),
+        newSessionBtn: document.getElementById('newSessionBtn'),
+        mobileDrawerBtn: document.getElementById('mobileDrawerBtn'),
+        mobileTicketBadge: document.getElementById('mobileTicketBadge'),
+        closeDrawerBtn: document.getElementById('closeDrawerBtn'),
+        drawerBackdrop: document.getElementById('drawerBackdrop'),
+        rightSidebar: document.getElementById('rightSidebar'),
+        chatScrollArea: document.getElementById('chatScrollArea'),
+        emptyState: document.getElementById('emptyState'),
+        messagesList: document.getElementById('messagesList'),
+        loadingIndicator: document.getElementById('loadingIndicator'),
+        messageInput: document.getElementById('messageInput'),
+        sendBtn: document.getElementById('sendBtn'),
+        sendBtnText: document.getElementById('sendBtnText'),
+        inputStatusHint: document.getElementById('inputStatusHint'),
+        traceStatusBadge: document.getElementById('traceStatusBadge'),
+        traceLatency: document.getElementById('traceLatency'),
+        traceToolsCount: document.getElementById('traceToolsCount'),
+        traceToolsContainer: document.getElementById('traceToolsContainer'),
+        traceCitationsCount: document.getElementById('traceCitationsCount'),
+        traceCitationsContainer: document.getElementById('traceCitationsContainer'),
+        ticketsCountBadge: document.getElementById('ticketsCountBadge'),
+        refreshTicketsBtn: document.getElementById('refreshTicketsBtn'),
+        refreshTicketsIcon: document.getElementById('refreshTicketsIcon'),
+        ticketsListContainer: document.getElementById('ticketsListContainer'),
+        ticketsUpdatedAt: document.getElementById('ticketsUpdatedAt'),
+        toast: document.getElementById('toast')
+      };
+
+      // ==================== 工具函数 ====================
+      function generateSessionId() {
+        const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+        let suffix = '';
+        if (window.crypto && window.crypto.getRandomValues) {
+          const bytes = new Uint8Array(8);
+          window.crypto.getRandomValues(bytes);
+          for (let i = 0; i < bytes.length; i++) {
+            suffix += chars[bytes[i] % chars.length];
+          }
+        } else {
+          for (let i = 0; i < 8; i++) {
+            suffix += chars[Math.floor(Math.random() * chars.length)];
+          }
+        }
+        return 'web_' + suffix;
+      }
+
+      function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function formatTime(dateInput) {
+        const d = dateInput ? new Date(dateInput) : new Date();
+        if (Number.isNaN(d.getTime())) return String(dateInput || '');
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        const ss = String(d.getSeconds()).padStart(2, '0');
+        return `${hh}:${mm}:${ss}`;
+      }
+
+      function formatTicketDate(val) {
+        if (!val) return '';
+        const d = new Date(val);
+        if (Number.isNaN(d.getTime())) return String(val);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return `${y}-${m}-${day} ${hh}:${mm}`;
+      }
+
+      function showToast(message) {
+        els.toast.textContent = message;
+        els.toast.classList.remove('opacity-0');
+        els.toast.classList.add('opacity-100');
+        clearTimeout(state.toastTimer);
+        state.toastTimer = setTimeout(() => {
+          els.toast.classList.remove('opacity-100');
+          els.toast.classList.add('opacity-0');
+        }, 2000);
+      }
+
+      // 渲染 Markdown 并移除潜在危险标签/属性
+      function renderMarkdownSafe(markdownText) {
+        const raw = typeof markdownText === 'string' ? markdownText : String(markdownText || '');
+        if (typeof window.marked === 'undefined') {
+          return '<p>' + escapeHtml(raw).replace(/\n/g, '<br>') + '</p>';
+        }
+
+        let html = '';
+        try {
+          html = window.marked.parse(raw, { breaks: true, gfm: true });
+        } catch (err) {
+          return '<p>' + escapeHtml(raw).replace(/\n/g, '<br>') + '</p>';
+        }
+
+        // 通过 DOM 解析进行安全清洗
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        const forbiddenTags = ['SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'STYLE', 'FORM'];
+        const walk = (node) => {
+          const children = Array.from(node.childNodes);
+          for (const child of children) {
+            if (child.nodeType === Node.ELEMENT_NODE) {
+              if (forbiddenTags.includes(child.tagName)) {
+                child.remove();
+                continue;
+              }
+              for (const attr of Array.from(child.attributes)) {
+                const name = attr.name.toLowerCase();
+                const val = (attr.value || '').trim().toLowerCase();
+                if (name.startsWith('on') || ((name === 'href' || name === 'src') && val.startsWith('javascript:'))) {
+                  child.removeAttribute(attr.name);
+                }
+              }
+              if (child.tagName === 'A') {
+                child.setAttribute('target', '_blank');
+                child.setAttribute('rel', 'noopener noreferrer');
+              }
+              walk(child);
+            }
+          }
+        };
+        walk(template.content);
+        return template.innerHTML;
+      }
+
+      function scrollChatToBottom() {
+        requestAnimationFrame(() => {
+          els.chatScrollArea.scrollTop = els.chatScrollArea.scrollHeight;
+        });
+      }
+
+      function autoResizeTextarea() {
+        const ta = els.messageInput;
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight, 144) + 'px';
+      }
+
+      function updateSendButtonState() {
+        const hasText = els.messageInput.value.trim().length > 0;
+        els.sendBtn.disabled = state.isLoading || !hasText;
+      }
+
+      // ==================== 会话管理 ====================
+      function setSessionId(sid) {
+        state.sessionId = sid;
+        els.sessionIdText.textContent = sid;
+        els.mobileSessionIdText.textContent = sid;
+      }
+
+      function resetTracePanel() {
+        els.traceStatusBadge.textContent = 'IDLE';
+        els.traceStatusBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-100 text-zinc-500';
+        els.traceLatency.textContent = '--';
+        els.traceToolsCount.textContent = '0';
+        els.traceToolsContainer.innerHTML = '<span class="text-xs text-zinc-400">等待发起对话...</span>';
+        els.traceCitationsCount.textContent = '0';
+        els.traceCitationsContainer.innerHTML = '<div class="text-xs text-zinc-400">暂无命中的知识库条文</div>';
+      }
+
+      function startNewSession(silent) {
+        if (state.isLoading) {
+          showToast('当前请求正在处理中，请稍候');
+          return;
+        }
+        setSessionId(generateSessionId());
+        els.messagesList.innerHTML = '';
+        els.emptyState.classList.remove('hidden');
+        resetTracePanel();
+        els.messageInput.value = '';
+        autoResizeTextarea();
+        updateSendButtonState();
+        els.messageInput.focus();
+        if (!silent) {
+          showToast('已开启新会话 ' + state.sessionId);
+        }
+      }
+
+      // ==================== 消息渲染 ====================
+      function appendUserMessage(text) {
+        els.emptyState.classList.add('hidden');
+        const wrapper = document.createElement('div');
+        wrapper.className = 'flex justify-end';
+        wrapper.innerHTML = `
+          <div class="max-w-[85%] sm:max-w-[78%] flex flex-col items-end gap-1">
+            <div class="bg-brand-700 text-white rounded-xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words shadow-[0_1px_2px_rgba(0,0,0,0.06)]">${escapeHtml(text)}</div>
+            <span class="text-[11px] text-zinc-400 font-mono px-1">${formatTime()}</span>
+          </div>
+        `;
+        els.messagesList.appendChild(wrapper);
+        scrollChatToBottom();
+      }
+
+      function appendAssistantMessage(replyMarkdown, meta) {
+        els.emptyState.classList.add('hidden');
+        const wrapper = document.createElement('div');
+        wrapper.className = 'flex items-start gap-3';
+
+        const tools = Array.isArray(meta && meta.tools_called) ? meta.tools_called : [];
+        const latency = meta && typeof meta.latency_ms === 'number' ? meta.latency_ms : null;
+
+        let metaHtml = `<span>${formatTime()}</span>`;
+        if (latency !== null) {
+          metaHtml += `<span class="text-zinc-300">·</span><span>${latency} ms</span>`;
+        }
+        if (tools.length > 0) {
+          metaHtml += `<span class="text-zinc-300">·</span><span class="text-brand-700">调用 ${tools.length} 个工具</span>`;
+        }
+
+        wrapper.innerHTML = `
+          <div class="w-7 h-7 rounded-md bg-brand-700 text-white flex items-center justify-center shrink-0 mt-0.5 text-[11px] font-semibold tracking-tight">
+            CS
+          </div>
+          <div class="min-w-0 flex-1 max-w-[92%] sm:max-w-[86%]">
+            <div class="bg-white border border-zinc-200 rounded-xl rounded-tl-sm px-4 py-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+              <div class="markdown-body">${renderMarkdownSafe(replyMarkdown)}</div>
+            </div>
+            <div class="mt-1.5 flex items-center gap-1.5 text-[11px] text-zinc-400 font-mono px-1">
+              ${metaHtml}
+            </div>
+          </div>
+        `;
+        els.messagesList.appendChild(wrapper);
+        scrollChatToBottom();
+      }
+
+      function appendErrorMessage(title, detail) {
+        els.emptyState.classList.add('hidden');
+        const wrapper = document.createElement('div');
+        wrapper.className = 'flex items-start gap-3';
+        wrapper.innerHTML = `
+          <div class="w-7 h-7 rounded-md bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center shrink-0 mt-0.5">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+          </div>
+          <div class="min-w-0 flex-1 max-w-[92%] sm:max-w-[86%]">
+            <div class="bg-rose-50/70 border border-rose-200 rounded-xl rounded-tl-sm px-4 py-3 text-sm text-rose-900">
+              <div class="font-medium">${escapeHtml(title)}</div>
+              <p class="mt-1 text-xs text-rose-700 leading-relaxed">${escapeHtml(detail)}</p>
+            </div>
+            <div class="mt-1.5 text-[11px] text-zinc-400 font-mono px-1">${formatTime()}</div>
+          </div>
+        `;
+        els.messagesList.appendChild(wrapper);
+        scrollChatToBottom();
+      }
+
+      // ==================== 推理追踪面板渲染 ====================
+      function getToolBadgeStyle(toolName) {
+        const name = String(toolName || '').toLowerCase();
+        if (name.includes('ticket') || name.includes('create')) {
+          return 'bg-amber-50 text-amber-800 border-amber-200';
+        }
+        if (name.includes('order') || name.includes('query')) {
+          return 'bg-brand-50 text-brand-800 border-brand-200';
+        }
+        if (name.includes('knowledge') || name.includes('search') || name.includes('rag')) {
+          return 'bg-sky-50 text-sky-800 border-sky-200';
+        }
+        return 'bg-zinc-100 text-zinc-700 border-zinc-200';
+      }
+
+      function renderTracePending() {
+        els.traceStatusBadge.textContent = 'RUNNING';
+        els.traceStatusBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-brand-50 text-brand-700 border border-brand-200';
+      }
+
+      function renderTraceError() {
+        els.traceStatusBadge.textContent = 'ERROR';
+        els.traceStatusBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200';
+      }
+
+      function renderTracePanel(data) {
+        els.traceStatusBadge.textContent = 'OK';
+        els.traceStatusBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200';
+
+        // 响应耗时
+        const latency = data && typeof data.latency_ms === 'number'
+          ? Math.round(data.latency_ms)
+          : (data && data.latency_ms !== undefined && data.latency_ms !== null ? data.latency_ms : '--');
+        els.traceLatency.textContent = latency;
+
+        // 工具调用
+        const tools = Array.isArray(data && data.tools_called) ? data.tools_called : [];
+        els.traceToolsCount.textContent = String(tools.length);
+        if (tools.length === 0) {
+          els.traceToolsContainer.innerHTML = `
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-zinc-100 text-zinc-600 border border-zinc-200">
+              <span class="w-1.5 h-1.5 rounded-full bg-zinc-400"></span>
+              直接回复
+            </span>
+          `;
+        } else {
+          els.traceToolsContainer.innerHTML = tools.map((tool) => {
+            const style = getToolBadgeStyle(tool);
+            return `
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono font-medium border ${style}">
+                <svg class="w-3 h-3 shrink-0 opacity-75" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+                </svg>
+                ${escapeHtml(tool)}
+              </span>
+            `;
+          }).join('');
+        }
+
+        // 知识库引用
+        const citations = Array.isArray(data && data.citations) ? data.citations : [];
+        els.traceCitationsCount.textContent = String(citations.length);
+        if (citations.length === 0) {
+          els.traceCitationsContainer.innerHTML = '<div class="text-xs text-zinc-400">本轮未命中知识库条文</div>';
+        } else {
+          els.traceCitationsContainer.innerHTML = citations.map((item) => {
+            const text = typeof item === 'string' ? item : JSON.stringify(item);
+            const hashIdx = text.indexOf('#');
+            let contentHtml = '';
+            if (hashIdx > 0) {
+              const docName = text.slice(0, hashIdx);
+              const sectionPath = text.slice(hashIdx + 1);
+              contentHtml = `
+                <div class="min-w-0">
+                  <div class="text-[11px] font-mono font-medium text-brand-700 truncate">${escapeHtml(docName)}</div>
+                  <div class="text-xs text-zinc-700 leading-snug mt-0.5 break-words">${escapeHtml(sectionPath)}</div>
+                </div>
+              `;
+            } else {
+              contentHtml = `<div class="text-xs text-zinc-700 leading-snug break-words">${escapeHtml(text)}</div>`;
+            }
+
+            return `
+              <div class="flex items-start gap-1.5 p-1.5 rounded-md bg-zinc-50 border border-zinc-200/80">
+                <svg class="w-3.5 h-3.5 text-zinc-400 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                  <line x1="16" y1="13" x2="8" y2="13"></line>
+                  <line x1="16" y1="17" x2="8" y2="17"></line>
+                </svg>
+                ${contentHtml}
+              </div>
+            `;
+          }).join('');
+        }
+      }
+
+      // ==================== 售后工单看板渲染 ====================
+      function normalizeTicketsPayload(payload) {
+        if (Array.isArray(payload)) return payload;
+        if (payload && typeof payload === 'object') {
+          if (Array.isArray(payload.tickets)) return payload.tickets;
+          if (Array.isArray(payload.items)) return payload.items;
+          if (Array.isArray(payload.data)) return payload.data;
+          if (Array.isArray(payload.results)) return payload.results;
+        }
+        return [];
+      }
+
+      function normalizeTicketItem(raw, index) {
+        const t = raw && typeof raw === 'object' ? raw : {};
+        return {
+          id: t.ticket_id ?? t.id ?? t.ticketId ?? `TKT-${index + 1}`,
+          orderId: t.order_id ?? t.orderId ?? t.order ?? '-',
+          issueType: t.issue_type ?? t.issueType ?? t.type ?? t.category ?? '售后申请',
+          status: t.status ?? t.state ?? 'OPEN',
+          reason: t.reason ?? t.description ?? t.detail ?? t.summary ?? '暂无原因描述',
+          createdAt: t.created_at ?? t.createdAt ?? t.timestamp ?? ''
+        };
+      }
+
+      function getStatusBadge(status) {
+        const s = String(status || '').trim();
+        const lower = s.toLowerCase();
+        if (['closed', 'resolved', 'done', 'completed', '已解决', '已完成', '已关闭', '已结单'].some(k => lower.includes(k))) {
+          return { label: s, cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' };
+        }
+        if (['rejected', 'cancelled', 'canceled', 'failed', '已取消', '已驳回'].some(k => lower.includes(k))) {
+          return { label: s, cls: 'bg-zinc-100 text-zinc-600 border-zinc-200' };
+        }
+        if (['processing', 'in_progress', 'handling', '处理中', '审核中'].some(k => lower.includes(k))) {
+          return { label: s, cls: 'bg-sky-50 text-sky-700 border-sky-200' };
+        }
+        return { label: s || '待处理', cls: 'bg-amber-50 text-amber-800 border-amber-200' };
+      }
+
+      function renderTicketsList(rawList) {
+        const list = rawList.map((item, idx) => normalizeTicketItem(item, idx));
+        els.ticketsCountBadge.textContent = String(list.length);
+        els.mobileTicketBadge.textContent = String(list.length);
+
+        if (list.length === 0) {
+          els.ticketsListContainer.innerHTML = `
+            <div class="py-8 px-4 text-center">
+              <div class="w-9 h-9 rounded-lg bg-zinc-100 text-zinc-400 flex items-center justify-center mx-auto mb-2.5">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                  <path d="M7 9h10M7 13h6"></path>
+                </svg>
+              </div>
+              <div class="text-xs font-medium text-zinc-600">暂无售后工单</div>
+              <p class="mt-1 text-[11px] text-zinc-400">当客服 Agent 创建工单后将在此实时显示</p>
+            </div>
+          `;
+          state.hasLoadedTicketsOnce = true;
+          return;
+        }
+
+        const newlyCreatedIds = new Set();
+        list.forEach((t) => {
+          const key = String(t.id);
+          if (state.hasLoadedTicketsOnce && !state.knownTicketIds.has(key)) {
+            newlyCreatedIds.add(key);
+          }
+          state.knownTicketIds.add(key);
+        });
+        state.hasLoadedTicketsOnce = true;
+
+        els.ticketsListContainer.innerHTML = list.map((ticket) => {
+          const statusBadge = getStatusBadge(ticket.status);
+          const isNew = newlyCreatedIds.has(String(ticket.id));
+          const timeStr = formatTicketDate(ticket.createdAt);
+
+          return `
+            <article class="bg-white border border-zinc-200 rounded-lg p-2.5 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:border-zinc-300 transition-colors ${isNew ? 'ticket-new' : ''}">
+              <div class="flex items-start justify-between gap-1.5">
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <span class="font-mono text-xs font-semibold text-zinc-900 truncate">${escapeHtml(ticket.id)}</span>
+                  ${isNew ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-brand-700 text-white shrink-0">NEW</span>' : ''}
+                </div>
+                <span class="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] sm:text-[11px] font-medium border ${statusBadge.cls}">
+                  ${escapeHtml(statusBadge.label)}
+                </span>
+              </div>
+
+              <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-700 border border-zinc-200/80 text-[10px] sm:text-[11px] font-mono">
+                  <span class="text-zinc-400 font-sans">订单</span>
+                  ${escapeHtml(ticket.orderId)}
+                </span>
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-brand-50 text-brand-800 border border-brand-200/80 text-[10px] sm:text-[11px] font-medium">
+                  ${escapeHtml(ticket.issueType)}
+                </span>
+              </div>
+
+              <p class="mt-1.5 text-xs text-zinc-600 leading-snug break-words">
+                ${escapeHtml(ticket.reason)}
+              </p>
+
+              ${timeStr ? `<div class="mt-1.5 pt-1 border-t border-zinc-100 text-[10px] font-mono text-zinc-400">${escapeHtml(timeStr)}</div>` : ''}
+            </article>
+          `;
+        }).join('');
+      }
+
+      async function fetchTickets(isManual) {
+        els.refreshTicketsIcon.classList.add('animate-spin');
+        els.refreshTicketsBtn.disabled = true;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+        try {
+          const res = await fetch('/api/tickets', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+            signal: controller.signal
+          });
+
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status} ${res.statusText}`);
+          }
+
+          const payload = await res.json();
+          const list = normalizeTicketsPayload(payload);
+          renderTicketsList(list);
+          els.ticketsUpdatedAt.textContent = '同步于 ' + formatTime();
+          if (isManual) {
+            showToast('工单列表已刷新');
+          }
+        } catch (err) {
+          const msg = err.name === 'AbortError' ? '拉取工单超时' : (err.message || '网络异常');
+          els.ticketsUpdatedAt.textContent = '同步失败';
+          if (!state.hasLoadedTicketsOnce) {
+            els.ticketsListContainer.innerHTML = `
+              <div class="py-10 px-4 text-center">
+                <div class="text-xs font-medium text-rose-700">无法加载工单列表</div>
+                <p class="mt-1 text-[11px] text-zinc-500">${escapeHtml(msg)}</p>
+              </div>
+            `;
+          } else if (isManual) {
+            showToast('刷新失败：' + msg);
+          }
+        } finally {
+          clearTimeout(timeoutId);
+          els.refreshTicketsIcon.classList.remove('animate-spin');
+          els.refreshTicketsBtn.disabled = false;
+        }
+      }
+
+      // ==================== 对话请求逻辑 ====================
+      function setLoadingState(loading) {
+        state.isLoading = loading;
+        els.loadingIndicator.classList.toggle('hidden', !loading);
+        els.sendBtnText.textContent = loading ? '处理中' : '发送';
+        els.inputStatusHint.textContent = loading ? '正在请求 /api/chat ...' : 'POST /api/chat';
+        updateSendButtonState();
+        if (loading) {
+          scrollChatToBottom();
+        }
+      }
+
+      async function sendMessage(rawText) {
+        const message = (rawText !== undefined ? rawText : els.messageInput.value).trim();
+        if (!message || state.isLoading) return;
+
+        els.messageInput.value = '';
+        autoResizeTextarea();
+        appendUserMessage(message);
+        setLoadingState(true);
+        renderTracePending();
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+        const startTime = performance.now();
+
+        try {
+          const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+              session_id: state.sessionId,
+              message: message
+            }),
+            signal: controller.signal
+          });
+
+          if (!res.ok) {
+            let errorDetail = `服务端返回状态码 ${res.status}`;
+            try {
+              const errBody = await res.json();
+              if (errBody && (errBody.detail || errBody.message || errBody.error)) {
+                const d = errBody.detail || errBody.message || errBody.error;
+                errorDetail = typeof d === 'string' ? d : JSON.stringify(d);
+              }
+            } catch (_) {
+              try {
+                const txt = await res.text();
+                if (txt) errorDetail = txt.slice(0, 240);
+              } catch (__) {}
+            }
+            throw new Error(errorDetail);
+          }
+
+          const data = await res.json();
+
+          // 同步后端返回的 session_id（如有）
+          if (data && data.session_id && typeof data.session_id === 'string') {
+            setSessionId(data.session_id);
+          }
+
+          const fallbackLatency = Math.round(performance.now() - startTime);
+          const normalizedData = {
+            reply: (data && typeof data.reply === 'string') ? data.reply : '（后端未返回回复内容）',
+            tools_called: Array.isArray(data && data.tools_called) ? data.tools_called : [],
+            latency_ms: (data && typeof data.latency_ms === 'number') ? data.latency_ms : fallbackLatency,
+            citations: Array.isArray(data && data.citations) ? data.citations : []
+          };
+
+          appendAssistantMessage(normalizedData.reply, normalizedData);
+          renderTracePanel(normalizedData);
+
+          // 每次对话返回自动刷新工单看板（尤其是调用建单工具后）
+          fetchTickets(false);
+        } catch (err) {
+          renderTraceError();
+          if (err && err.name === 'AbortError') {
+            appendErrorMessage(
+              '请求超时，请稍后重试',
+              '智能客服接口响应时间过长（超过 90 秒），请检查后端服务状态或重新发送问题。'
+            );
+          } else {
+            appendErrorMessage(
+              '抱歉，对话服务暂时不可用',
+              (err && err.message) ? err.message : '网络连接异常，请确认本地 FastAPI 服务正在运行。'
+            );
+          }
+        } finally {
+          clearTimeout(timeoutId);
+          setLoadingState(false);
+          els.messageInput.focus();
+        }
+      }
+
+      // ==================== 移动端抽屉控制 ====================
+      function openDrawer() {
+        els.rightSidebar.classList.remove('translate-x-full');
+        els.drawerBackdrop.classList.remove('hidden');
+      }
+
+      function closeDrawer() {
+        els.rightSidebar.classList.add('translate-x-full');
+        els.drawerBackdrop.classList.add('hidden');
+      }
+
+      // ==================== 事件绑定 ====================
+      function bindEvents() {
+        // 输入框自适应与按钮状态
+        els.messageInput.addEventListener('input', () => {
+          autoResizeTextarea();
+          updateSendButtonState();
+        });
+
+        // 中文输入法防误触 Enter
+        els.messageInput.addEventListener('compositionstart', () => {
+          state.isComposing = true;
+        });
+        els.messageInput.addEventListener('compositionend', () => {
+          state.isComposing = false;
+        });
+
+        // Enter 发送，Shift+Enter 换行
+        els.messageInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.isComposing || state.isComposing || e.keyCode === 229) {
+              return;
+            }
+            e.preventDefault();
+            sendMessage();
+          }
+        });
+
+        // 发送按钮
+        els.sendBtn.addEventListener('click', () => {
+          sendMessage();
+        });
+
+        // 快捷测试提问按钮
+        document.querySelectorAll('.quick-prompt-btn').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const prompt = btn.getAttribute('data-prompt') || '';
+            if (prompt && !state.isLoading) {
+              sendMessage(prompt);
+            }
+          });
+        });
+
+        // 新建会话
+        els.newSessionBtn.addEventListener('click', () => {
+          startNewSession(false);
+        });
+
+        // 点击复制 Session ID
+        els.sessionIdBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(state.sessionId);
+            showToast('已复制 Session ID：' + state.sessionId);
+          } catch (_) {
+            showToast('当前 Session ID：' + state.sessionId);
+          }
+        });
+
+        // 手动刷新工单
+        els.refreshTicketsBtn.addEventListener('click', () => {
+          fetchTickets(true);
+        });
+
+        // 移动端抽屉交互
+        els.mobileDrawerBtn.addEventListener('click', openDrawer);
+        els.closeDrawerBtn.addEventListener('click', closeDrawer);
+        els.drawerBackdrop.addEventListener('click', closeDrawer);
+      }
+
+      // ==================== 初始化 ====================
+      function init() {
+        setSessionId(generateSessionId());
+        bindEvents();
+        updateSendButtonState();
+        fetchTickets(false);
+        els.messageInput.focus();
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>

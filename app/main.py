@@ -1,19 +1,26 @@
 """
 app/main.py
 
-FastAPI 应用入口：初始化数据库、挂载所有路由。
+FastAPI 应用入口：初始化数据库、挂载所有业务路由与前端静态工作台。
 """
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator, Dict
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.db.database import init_db
 from app.routers.orders import router as orders_router
 from app.routers.tickets import router as tickets_router
 from app.routers.chat import router as chat_router
 from app.routers.knowledge import router as knowledge_router
+
+# 静态资源与主页路径（通过 Path(__file__) 定位，不依赖运行目录）
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+_INDEX_HTML = _STATIC_DIR / "index.html"
 
 # 配置全局日志格式
 logging.basicConfig(
@@ -49,6 +56,17 @@ app.include_router(orders_router)
 app.include_router(tickets_router)
 app.include_router(chat_router)
 app.include_router(knowledge_router)
+
+# 挂载静态资源服务（供 /static/ 下静态文件直接访问）
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+
+@app.get("/", summary="前端智能售后工作台", tags=["frontend"])
+def read_index() -> FileResponse:
+    """
+    提供智能售后工作台单页应用 (SPA)
+    """
+    return FileResponse(_INDEX_HTML)
 
 
 @app.get("/health", summary="健康检查接口", tags=["system"])
