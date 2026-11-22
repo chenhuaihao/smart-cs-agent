@@ -29,13 +29,14 @@ logger = logging.getLogger(__name__)
 # 路径解析不依赖当前运行目录 (CWD)，适应任意启动方式
 _KNOWLEDGE_DIR: Path = Path(__file__).resolve().parents[2] / "data" / "knowledge"
 
-# 中文常见停用词（高频虚词，对语义无贡献，过滤后提升检索精度）
+# 中文常见停用词（高频虚词与对客客套词，对语义无贡献，过滤后提升检索精度）
 _STOPWORDS: set[str] = {
     "的", "了", "是", "在", "我", "您", "他", "她", "它",
     "们", "这", "那", "有", "和", "也", "就", "都", "不",
     "与", "或", "及", "以", "但", "而", "如", "对", "对于",
     "什么", "怎么", "如何", "可以", "能", "会", "要", "吗",
-    "呢", "啊", "吧", "哦", "嗯",
+    "呢", "啊", "吧", "哦", "嗯", "请问", "期", "办",
+    "你们", "我们", "店", "本店", "问下", "帮我", "查下", "一下", "支持",
 }
 
 # 匹配 ## 或 ### 级标题的正则
@@ -69,6 +70,7 @@ class KnowledgeRetriever:
         self._dir = knowledge_dir
         self._chunks: list[KnowledgeChunk] = []  # 切分后的文档块
         self._tokenized_corpus: list[list[str]] = []  # 分词后的语料
+        self._section_tokens: list[set[str]] = []     # 章节标题词元集合（用于标题相关性门控）
         self._bm25: BM25Okapi | None = None          # 延迟初始化
 
         self._load_and_index()
@@ -209,6 +211,12 @@ class KnowledgeRetriever:
             self._chunks = [self._chunks[i] for i in valid_indices]
             self._tokenized_corpus = [self._tokenized_corpus[i] for i in valid_indices]
 
+        # 预计算每个文档块的章节标题词元集合，用于结构化层级相关性门控
+        self._section_tokens = [
+            set(self._tokenize(chunk["section"]))
+            for chunk in self._chunks
+        ]
+
         # 构建 BM25 索引，k1=1.5 / b=0.75 为通用中文文档推荐参数
         self._bm25 = BM25Okapi(self._tokenized_corpus, k1=1.5, b=0.75)
         logger.info(
@@ -225,7 +233,7 @@ class KnowledgeRetriever:
         self,
         query: str,
         top_k: int = 3,
-        min_score: float = 2.0,
+        min_score: float = 3.0,
     ) -> list[KnowledgeChunk]:
         """
         对 query 进行 BM25 检索，返回按相关性降序排列的命中条款列表。
@@ -233,7 +241,7 @@ class KnowledgeRetriever:
         参数：
             query     - 用户查询文本（中文自然语言）
             top_k     - 最多返回条款数，默认 3
-            min_score - 最低 BM25 得分阈值，默认 2.0，低于此分数的弱相关/无意义匹配将被直接过滤
+            min_score - 最低 BM25 得分阈值，默认 3.0，低于此分数的弱相关/无意义匹配将被直接过滤
 
         返回：
             命中块列表，每项包含 source / section / content / score；
@@ -254,13 +262,50 @@ class KnowledgeRetriever:
         # 计算每个文档块的 BM25 得分
         scores = self._bm25.get_scores(query_tokens)
 
-        # 过滤 score < min_score 的弱相关与无关块，仅保留高置信度结果
-        # 边界原因：BM25 对弱撞字返回 0.1~1.5 分，设置 2.0 阈值避免无意义噪点进入 citations 误导大模型
-        scored_chunks = [
-            {**self._chunks[i], "score": float(scores[i])}
-            for i in range(len(self._chunks))
-            if scores[i] >= min_score
-        ]
+        # 提取 query 的去重有效词元集合，用于计算词元覆盖度（Coordination Factor）
+        query_token_set = set(query_tokens)
+        query_token_count = len(query_token_set)
+
+        # 过滤 score < min_score 且结合层级相关性与覆盖度门控
+        # 边界原因：
+        # 1. min_score: 默认 3.0，过滤低于正常条款得分的弱相关块（真实有效条款得分通常 >= 4.0）
+        # 2. 结构化层级相关性：章节标题 (section) 词元交集。
+        #    真实售后条款标题必然命中 query 的核心词元；若标题完全无交集且命中词元 <= 2，
+        #    属于正文边缘偶发词（如退款说明正文偶然提及"分期"和"抵扣"），直接作为噪音过滤。
+        # 3. 词元覆盖度校验：长查询要求覆盖率与命中词元数达到门槛，防虚假共现高分。
+        scored_chunks = []
+        for i in range(len(self._chunks)):
+            sc = float(scores[i])
+            if sc < min_score:
+                continue
+
+            doc_tokens = set(self._tokenized_corpus[i])
+            matched_tokens = query_token_set & doc_tokens
+            coverage = len(matched_tokens) / query_token_count
+
+            # 标题词元交集
+            matched_in_section = query_token_set & self._section_tokens[i]
+
+            # 1. 基础命中门槛：query >= 3 个词元时，至少命中 2 个不同词元
+            if query_token_count >= 3 and len(matched_tokens) < 2:
+                continue
+
+            # 2. 标题相关性门控：若章节标题与 query 毫无交集，必须命中 >= 3 个不同词元且得分充足 (>= 7.0)
+            if len(matched_in_section) == 0:
+                if len(matched_tokens) < 3 or sc < 7.0:
+                    continue
+
+            # 3. 中长句词元覆盖度门控：
+            if query_token_count >= 5:
+                if len(matched_tokens) < 3 and coverage < 0.35:
+                    continue
+                if len(matched_tokens) == 2 and sc < 7.0:
+                    continue
+            if query_token_count >= 8:
+                if len(matched_tokens) < 3 or (len(matched_tokens) < 4 and coverage < 0.30):
+                    continue
+
+            scored_chunks.append({**self._chunks[i], "score": sc})
 
         if not scored_chunks:
             logger.info("knowledge: query='%s' 在阈值 min_score=%.1f 下无命中结果", query[:50], min_score)

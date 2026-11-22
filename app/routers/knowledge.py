@@ -57,7 +57,7 @@ class KnowledgeSearchResponse(BaseModel):
 def search_knowledge(
     q: str = Query(..., min_length=1, description="查询关键词，如'耳机拆封退货'"),
     top_k: int = Query(default=3, ge=1, le=10, description="最多返回条数，默认 3，最大 10"),
-    min_score: float = Query(default=2.0, ge=0.0, description="最低 BM25 得分过滤阈值，默认 2.0"),
+    min_score: float = Query(default=3.0, ge=0.0, description="最低 BM25 得分过滤阈值，默认 3.0"),
 ) -> KnowledgeSearchResponse:
     """
     知识库检索调试接口。
