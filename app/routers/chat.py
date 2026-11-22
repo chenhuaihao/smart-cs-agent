@@ -6,8 +6,9 @@ app/routers/chat.py
 """
 
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from app.agent.core import run_agent
+from app.core.limiter import check_chat_rate_limit
 from app.schemas.chat import ChatRequest, ChatResponse
 
 logger = logging.getLogger(__name__)
@@ -19,10 +20,12 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
     "",
     response_model=ChatResponse,
     summary="发送消息给智能客服 Agent",
+    dependencies=[Depends(check_chat_rate_limit)],
     description=(
         "接收用户消息，经过多轮 Function Calling 推理后返回助手回复。"
         "同一 session_id 的请求会共享对话历史（最近 6 轮）。"
         "若本轮调用了知识库检索且有命中，citations 字段返回溯源条款来源。"
+        "受内存滑动窗口限流保护（默认 15 次/分/IP）。"
     ),
 )
 def chat(request: ChatRequest) -> ChatResponse:

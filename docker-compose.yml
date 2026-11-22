@@ -1,0 +1,29 @@
+services:
+  smart-cs-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: smart-cs-agent
+    ports:
+      - "8000:8000"
+    # 从项目根目录 .env 注入环境变量（API Key、模型名称、限流配置等）
+    env_file:
+      - .env
+    environment:
+      - SQLITE_DB_PATH=/app/data/smart_cs.db
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-15}
+    # 数据持久化挂载：映射宿主机 data 目录到容器内部，保障工单数据与对话日志重启不丢失
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    # 容器健康检查配置
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).getcode() == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

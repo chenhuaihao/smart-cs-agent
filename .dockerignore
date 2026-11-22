@@ -1,0 +1,44 @@
+# Git 与开发工具配置
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.fleet
+
+# 虚拟环境与依赖缓存
+.venv
+venv/
+env/
+__pypackages__/
+
+# Python 编译与测试缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 敏感环境变量与凭据（严禁打入镜像）
+.env
+.env.*
+!.env.example
+
+# 本地运行生成的数据库文件（由 Docker volume 挂载管理）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite3
+*.sqlite3-journal
+
+# 自动化评测报告与本地运行日志
+eval/eval_report.md
+logs/
+*.log
+
+# 临时中间文件
+*.tmp
+tempCodeRunnerFile.py

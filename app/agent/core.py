@@ -30,16 +30,17 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 客户端初始化（模块级单例，避免每次请求重复创建）
+# 优先读取 DEEPSEEK_* 环境变量，兼容 OPENAI_* 配置
 # ---------------------------------------------------------------------------
 
-_API_KEY = os.getenv("OPENAI_API_KEY", "")
-_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
-_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "deepseek-chat")
+_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+_BASE_URL = os.getenv("DEEPSEEK_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+_MODEL_NAME = os.getenv("DEEPSEEK_MODEL") or os.getenv("OPENAI_MODEL_NAME", "deepseek-chat")
 
 if not _API_KEY:
     # 缺少 API Key 时立刻报错，避免在实际请求时才触发隐晦的 401
     raise EnvironmentError(
-        "缺少环境变量 OPENAI_API_KEY！"
+        "缺少大模型 API Key 环境变量（DEEPSEEK_API_KEY 或 OPENAI_API_KEY）！"
         "请在项目根目录的 .env 文件中配置真实的 API Key，参考 .env.example。"
     )
 

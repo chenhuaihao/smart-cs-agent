@@ -223,7 +223,13 @@ __marimo__/
 .streamlit/secrets.toml
 # 本地密钥与数据库（严禁提交到公开仓库）
 .env
+.env.*
+!.env.example
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.sqlite3
+*.sqlite3-journal
 chroma_data/
 logs/
