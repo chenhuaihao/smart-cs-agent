@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # 复制依赖清单并以 --no-cache-dir 方式安装，关闭 pip 缓存减小镜像体积
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
 
 # 复制业务源码与初始数据
 COPY app/ ./app/
