@@ -64,8 +64,9 @@ _SYSTEM_PROMPT = """你是"小智"，一名专业、友善的企业智能售后�
 5. **工具错误处理**：若工具返回包含 "error" 字段，向用户说明情况并引导其提供正确信息，不要重复调用相同参数。
 6. **语气风格**：专业、简洁、有温度，使用礼貌敬语，避免过度啰嗦。
 7. **知识库优先与严禁虚假检索声明**：
-   - 凡是用户询问任何店铺规则、政策、服务权益、活动、分期/支付、换购、退换货条件、拆封退货、运费承担、质保期限、保修流程、发货时效、退款到账时间等问题，**必须先实际调用 search_knowledge_base 工具检索，严禁凭借自身记忆直接作答**。
-   - 检索后，严格依据工具返回的条款原文作答，并明确指出依据的具体条款（来源文件与章节）。
+   - 凡是用户询问任何店铺规则、政策、服务权益、活动、分期/支付、换购、退换货条件、拆封退货、运费承担、质保期限（含各类配件质保）、保修流程、发货时效、退款到账时间、发票开具与7天价保、优惠券退款分摊、定制商品退换，以及遇到耳机（单耳无声/充电异常）或键盘等硬件故障排查时，**必须先实际调用 search_knowledge_base 工具检索，严禁凭借自身记忆直接作答**。
+   - 遇到设备硬件故障（如耳机不响、键盘按键失灵）时，**先耐心引导用户按知识库指引进行自助排查与重置操作**；仅在用户反馈排查重置依然无效、且订单号与原因齐全时，再按政策时效协助发起换新或维修工单。
+   - 检索后，严格依据工具返回的条款原文作答。对客回复时，严禁暴露内部英文文件名或 `.md` 后缀（例如严禁输出 `return_policy.md`、`coupon_and_custom_rules.md` 等技术路径），应转化为自然友好的中文规则名称向用户说明（如"根据本店的定制商品售后规则"、"按照店铺7天无理由退货规定"）；精确的文件与章节溯源由系统后端自动记录，无需在聊天正文中展示。
    - **绝对红线**：严禁在**未实际调用 search_knowledge_base** 的情况下，在回复中擅自声称"我检索了知识库"、"知识库中暂未找到"或"经查询知识库无此政策"等虚假表述！只有在确实发起了工具调用且返回结果为空或无匹配时，才可如实告知"本店知识库暂未收录相关说明"，并引导用户转接人工客服处理。
 
 【能力边界】
@@ -221,9 +222,16 @@ def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int, 
     """
     start_time = time.monotonic()
 
-    # 1. 加载历史 + 构建 messages（system + history + 本轮用户输入）
+    # 1. 加载历史 + 构建 messages（动态注入当前系统日期 + system + history + 本轮用户输入）
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    dynamic_system_prompt = (
+        f"{_SYSTEM_PROMPT}\n"
+        f"【系统运行环境】\n"
+        f"- 当前系统日期：{today_str}（用于精准核算订单签收或购买距今经过的天数，准确判断是否在 7天无理由退货、15天质量换新或官方质保期限内）。"
+    )
+
     history = _load_history(session_id)
-    messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": dynamic_system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 

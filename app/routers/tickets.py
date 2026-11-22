@@ -4,7 +4,7 @@ import uuid
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query, status
 from app.db.database import get_db_connection
-from app.schemas.ticket import TicketCreate, TicketResponse
+from app.schemas.ticket import TicketCreate, TicketResponse, TicketStatusUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -124,3 +124,78 @@ def list_tickets(
         rows = cursor.fetchall()
 
     return [TicketResponse.model_validate(dict(row)) for row in rows]
+
+
+# 合法流转状态集合（支持中文及常见别名映射，确保数据库与展示一致）
+_STATUS_ALIAS_MAP = {
+    "open": "待处理",
+    "pending": "待处理",
+    "待处理": "待处理",
+    "processing": "处理中",
+    "in_progress": "处理中",
+    "处理中": "处理中",
+    "completed": "已完成",
+    "done": "已完成",
+    "resolved": "已完成",
+    "已完成": "已完成",
+    "已结单": "已结单",
+    "已关闭": "已关闭",
+}
+
+
+@router.patch(
+    "/{ticket_id}",
+    response_model=TicketResponse,
+    summary="更新工单处理状态",
+    description="支持将工单状态在'待处理' -> '处理中' -> '已完成'等合法状态之间流转更新。"
+)
+def update_ticket_status(ticket_id: str, payload: TicketStatusUpdate) -> TicketResponse:
+    """
+    工单状态流转更新：
+    1. 校验目标状态合法性（兼容中英文字符映射）；
+    2. 校验 ticket_id 存在性，不存在返回 404；
+    3. 参数化 UPDATE 原生 SQL；
+    4. 查询并返回最新工单完整出参。
+    """
+    raw_status = payload.status.strip()
+    target_status = _STATUS_ALIAS_MAP.get(raw_status.lower(), _STATUS_ALIAS_MAP.get(raw_status))
+    if not target_status:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"非法工单状态 '{raw_status}'，支持的状态包括：待处理、处理中、已完成、已结单、已关闭"
+        )
+
+    clean_ticket_id = ticket_id.strip()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # 1. 检查工单是否存在
+        cursor.execute("SELECT 1 FROM tickets WHERE ticket_id = ?;", (clean_ticket_id,))
+        if not cursor.fetchone():
+            logger.warning("更新工单状态失败：工单 %s 不存在", clean_ticket_id)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"工单 {clean_ticket_id} 不存在"
+            )
+
+        # 2. 原生参数化更新
+        cursor.execute(
+            "UPDATE tickets SET status = ? WHERE ticket_id = ?;",
+            (target_status, clean_ticket_id),
+        )
+        conn.commit()
+
+        # 3. 查出最新数据返回
+        cursor.execute(
+            """
+            SELECT ticket_id, order_id, issue_type, reason, status, summary, created_at
+            FROM tickets
+            WHERE ticket_id = ?;
+            """,
+            (clean_ticket_id,),
+        )
+        row = cursor.fetchone()
+
+    logger.info("工单状态流转成功：%s -> %s", clean_ticket_id, target_status)
+    return TicketResponse.model_validate(dict(row))
+

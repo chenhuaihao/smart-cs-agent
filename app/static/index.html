@@ -983,6 +983,40 @@
           const isNew = newlyCreatedIds.has(String(ticket.id));
           const timeStr = formatTicketDate(ticket.createdAt);
 
+          const s = String(ticket.status || '').trim().toLowerCase();
+          let actionBtnHtml = '';
+          if (['待处理', 'open', 'pending'].some(k => s.includes(k))) {
+            actionBtnHtml = `
+              <button
+                type="button"
+                class="ticket-action-btn inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-200 transition-colors"
+                data-ticket-id="${escapeHtml(ticket.id)}"
+                data-next-status="处理中"
+                title="点击流转至处理中"
+              >
+                <span>接单处理</span>
+                <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+              </button>
+            `;
+          } else if (['处理中', 'processing', 'in_progress'].some(k => s.includes(k))) {
+            actionBtnHtml = `
+              <button
+                type="button"
+                class="ticket-action-btn inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition-colors"
+                data-ticket-id="${escapeHtml(ticket.id)}"
+                data-next-status="已完成"
+                title="点击标记为已完成"
+              >
+                <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+                <span>标记完成</span>
+              </button>
+            `;
+          }
+
           return `
             <article class="bg-white border border-zinc-200 rounded-lg p-2.5 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:border-zinc-300 transition-colors ${isNew ? 'ticket-new' : ''}">
               <div class="flex items-start justify-between gap-1.5">
@@ -1009,7 +1043,10 @@
                 ${escapeHtml(ticket.reason)}
               </p>
 
-              ${timeStr ? `<div class="mt-1.5 pt-1 border-t border-zinc-100 text-[10px] font-mono text-zinc-400">${escapeHtml(timeStr)}</div>` : ''}
+              <div class="mt-1.5 pt-1 border-t border-zinc-100 flex items-center justify-between text-[10px]">
+                <span class="font-mono text-zinc-400">${escapeHtml(timeStr || '')}</span>
+                ${actionBtnHtml}
+              </div>
             </article>
           `;
         }).join('');
@@ -1228,6 +1265,47 @@
         // 手动刷新工单
         els.refreshTicketsBtn.addEventListener('click', () => {
           fetchTickets(true);
+        });
+
+        // 工单状态轻量流转（事件委托）
+        els.ticketsListContainer.addEventListener('click', async (e) => {
+          const btn = e.target.closest('.ticket-action-btn');
+          if (!btn || btn.disabled) return;
+
+          const ticketId = btn.getAttribute('data-ticket-id');
+          const nextStatus = btn.getAttribute('data-next-status');
+          if (!ticketId || !nextStatus) return;
+
+          btn.disabled = true;
+          const origText = btn.innerHTML;
+          btn.innerHTML = `<span>更新中...</span>`;
+
+          try {
+            const res = await fetch(`/api/tickets/${encodeURIComponent(ticketId)}`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+              },
+              body: JSON.stringify({ status: nextStatus })
+            });
+
+            if (!res.ok) {
+              let errMsg = `HTTP ${res.status}`;
+              try {
+                const errJson = await res.json();
+                if (errJson && errJson.detail) errMsg = errJson.detail;
+              } catch (_) {}
+              throw new Error(errMsg);
+            }
+
+            showToast(`工单 ${ticketId} 状态已更新为「${nextStatus}」`);
+            await fetchTickets(false);
+          } catch (err) {
+            btn.disabled = false;
+            btn.innerHTML = origText;
+            showToast('状态流转失败：' + (err.message || '网络异常'));
+          }
         });
 
         // 移动端抽屉交互

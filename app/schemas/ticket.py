@@ -15,6 +15,18 @@ class TicketCreate(BaseModel):
     summary: Optional[str] = Field(None, max_length=200, description="工单简述或处理备注")
 
 
+class TicketStatusUpdate(BaseModel):
+    """
+    更新工单状态入参模型 (Pydantic v2)
+    """
+    status: str = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="工单目标状态，如'待处理'、'处理中'、'已完成'、'已结单'等",
+    )
+
+
 class TicketResponse(BaseModel):
     """
     工单出参模型 (Pydantic v2)

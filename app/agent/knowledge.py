@@ -221,17 +221,23 @@ class KnowledgeRetriever:
     # 公共方法：检索
     # ------------------------------------------------------------------
 
-    def search(self, query: str, top_k: int = 3) -> list[KnowledgeChunk]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        min_score: float = 2.0,
+    ) -> list[KnowledgeChunk]:
         """
         对 query 进行 BM25 检索，返回按相关性降序排列的命中条款列表。
 
         参数：
-            query  - 用户查询文本（中文自然语言）
-            top_k  - 最多返回条款数，默认 3
+            query     - 用户查询文本（中文自然语言）
+            top_k     - 最多返回条款数，默认 3
+            min_score - 最低 BM25 得分阈值，默认 2.0，低于此分数的弱相关/无意义匹配将被直接过滤
 
         返回：
             命中块列表，每项包含 source / section / content / score；
-            无命中时返回空列表（score=0 的块被过滤掉）。
+            无命中或得分均低于 min_score 时返回空列表。
         """
         # 知识库为空时直接返回空列表（不抛异常，调用方兜底）
         if self._bm25 is None or not self._chunks:
@@ -248,16 +254,16 @@ class KnowledgeRetriever:
         # 计算每个文档块的 BM25 得分
         scores = self._bm25.get_scores(query_tokens)
 
-        # 过滤 score <= 0 的无关块，只保留有实际命中的结果
-        # 边界原因：BM25 对完全不相关文档返回 0，保留 0 分块会误导大模型
+        # 过滤 score < min_score 的弱相关与无关块，仅保留高置信度结果
+        # 边界原因：BM25 对弱撞字返回 0.1~1.5 分，设置 2.0 阈值避免无意义噪点进入 citations 误导大模型
         scored_chunks = [
             {**self._chunks[i], "score": float(scores[i])}
             for i in range(len(self._chunks))
-            if scores[i] > 0
+            if scores[i] >= min_score
         ]
 
         if not scored_chunks:
-            logger.info("knowledge: query='%s' 无命中结果", query[:50])
+            logger.info("knowledge: query='%s' 在阈值 min_score=%.1f 下无命中结果", query[:50], min_score)
             return []
 
         # 按得分降序排序，取 top_k
@@ -265,8 +271,8 @@ class KnowledgeRetriever:
         results = scored_chunks[:top_k]
 
         logger.info(
-            "knowledge: query='%s' 命中 %d 块（总正分块 %d），top1 score=%.3f",
-            query[:50], len(results), len(scored_chunks), results[0]["score"],
+            "knowledge: query='%s' 命中 %d 块（>=%.1f分块数 %d），top1 score=%.3f",
+            query[:50], len(results), min_score, len(scored_chunks), results[0]["score"],
         )
         return results  # type: ignore[return-value]
 

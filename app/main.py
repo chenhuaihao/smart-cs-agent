@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.db.database import init_db
+from app.db.seed import seed_orders
 from app.routers.orders import router as orders_router
 from app.routers.tickets import router as tickets_router
 from app.routers.chat import router as chat_router
@@ -39,7 +40,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     logger.info("应用正在启动，执行数据库初始化检测..")
     init_db()
-    logger.info("数据库初始化完成，系统就绪")
+    seed_orders()
+    logger.info("数据库初始化与订单数据补录完成，系统就绪")
     yield
     logger.info("应用正在关闭...")
 

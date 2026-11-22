@@ -34,7 +34,8 @@ class KnowledgeSearchResponse(BaseModel):
     """检索接口响应体"""
     query: str = Field(..., description="原始查询文本")
     top_k: int = Field(..., description="请求的最大返回条数")
-    total_hits: int = Field(..., description="实际命中条数（score > 0 的结果数，可能小于 top_k）")
+    min_score: float = Field(..., description="使用的最低得分过滤阈值")
+    total_hits: int = Field(..., description="实际命中条数（score >= min_score 的结果数，可能小于 top_k）")
     results: List[KnowledgeHit] = Field(default_factory=list, description="按相关性降序排列的命中列表")
 
 
@@ -50,23 +51,24 @@ class KnowledgeSearchResponse(BaseModel):
         "对本地 data/knowledge/*.md 中的售后规则文档执行 BM25 检索，"
         "返回按相关性排序的命中条款列表。"
         "该接口直接调用检索模块，不经过大模型，方便验证切块和检索质量。"
-        "score=0 的块已被过滤，仅返回真正相关的结果。"
+        "低于 min_score 阈值的块已被过滤，仅返回高置信度相关的结果。"
     ),
 )
 def search_knowledge(
     q: str = Query(..., min_length=1, description="查询关键词，如'耳机拆封退货'"),
     top_k: int = Query(default=3, ge=1, le=10, description="最多返回条数，默认 3，最大 10"),
+    min_score: float = Query(default=2.0, ge=0.0, description="最低 BM25 得分过滤阈值，默认 2.0"),
 ) -> KnowledgeSearchResponse:
     """
     知识库检索调试接口。
     直接调用 KnowledgeRetriever.search()，完全绕过大模型，
-    方便在 /docs 中逐条验证切块粒度和检索命中质量。
+    方便在 /docs 中逐条验证切块粒度、检索命中质量与阈值过滤效果。
     """
-    logger.info("GET /api/knowledge/search q='%s' top_k=%d", q[:50], top_k)
+    logger.info("GET /api/knowledge/search q='%s' top_k=%d min_score=%.1f", q[:50], top_k, min_score)
 
     retriever = get_retriever()
     # 单例已在首次请求（或服务启动）时初始化，此处直接使用
-    raw_results = retriever.search(query=q, top_k=top_k)
+    raw_results = retriever.search(query=q, top_k=top_k, min_score=min_score)
 
     hits = [
         KnowledgeHit(
@@ -81,6 +83,7 @@ def search_knowledge(
     return KnowledgeSearchResponse(
         query=q,
         top_k=top_k,
+        min_score=min_score,
         total_hits=len(hits),
         results=hits,
     )
