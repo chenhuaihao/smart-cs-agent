@@ -33,7 +33,8 @@ def get_db_connection() -> Generator[sqlite3.Connection, None, None]:
        防止在 FastAPI 并发请求下出现文件句柄泄漏或 database is locked 错误。
     """
     _ensure_db_dir_exists(DB_PATH)
-    conn = sqlite3.connect(DB_PATH)
+    # timeout=15.0 配合 check_same_thread=False，防止并发评测多线程建单时触发 database is locked
+    conn = sqlite3.connect(DB_PATH, timeout=15.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
