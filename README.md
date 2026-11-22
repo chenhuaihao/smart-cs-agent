@@ -292,3 +292,10 @@ smart-cs-agent/
 ## 📄 开源许可证
 
 本项目基于 [MIT License](LICENSE) 开源。欢迎交流、学习与技术探讨！
+
+## 公网演示环境（阿里云 ECS 华南3·广州）
+- **在线访问地址**：http://8.166.124.35:8000
+- **部署形态**：Docker Compose + FastAPI + SQLite + 内存 IP 限流（15 req/min）
+- **界面截图**：*(请将线上工作台截图保存至 docs/demo.png 后取消下方注释)*
+  <!-- ![Smart CS Agent 线上工作台](docs/demo.png) -->
+
