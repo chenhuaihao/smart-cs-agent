@@ -232,4 +232,5 @@ __marimo__/
 *.sqlite3
 *.sqlite3-journal
 chroma_data/
+data/chroma_db/
 logs/

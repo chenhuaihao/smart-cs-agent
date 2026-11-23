@@ -27,7 +27,11 @@ class KnowledgeHit(BaseModel):
     source: str = Field(..., description="来源文件名，如 return_policy.md")
     section: str = Field(..., description="命中的章节标题")
     content: str = Field(..., description="章节正文内容")
-    score: float = Field(..., description="BM25 相关性得分，越高越相关")
+    score: float = Field(..., description="相关性得分（纯 BM25 分或 Hybrid RRF 融合分），越高越相关")
+    retrieval_source: str = Field(
+        default="bm25",
+        description="命中来源：bm25（仅关键词）/ vector（仅语义）/ hybrid（双路融合）",
+    )
 
 
 class KnowledgeSearchResponse(BaseModel):
@@ -76,6 +80,7 @@ def search_knowledge(
             section=chunk["section"],
             content=chunk["content"],
             score=chunk["score"],
+            retrieval_source=chunk.get("retrieval_source", "bm25"),
         )
         for chunk in raw_results
     ]

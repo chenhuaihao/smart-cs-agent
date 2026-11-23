@@ -72,8 +72,11 @@ class AgentState(TypedDict, total=False):
     fallback_reason: str
 
 
-def extract_citations(tool_name: str, tool_result: str) -> list[str]:
-    """从 search_knowledge_base 的结构化 JSON 结果中提取 "文件名#章节名"（保序去重）。"""
+def extract_citation_details(tool_name: str, tool_result: str) -> list[dict[str, Any]]:
+    """
+    从 search_knowledge_base 的结构化 JSON 结果中提取引用详情（保序去重）。
+    每条包含 source（'文件名#章节名'）、retrieval_source（bm25/vector/hybrid）与 score。
+    """
     if tool_name != "search_knowledge_base":
         return []
     try:
@@ -83,13 +86,36 @@ def extract_citations(tool_name: str, tool_result: str) -> list[str]:
     if not isinstance(data, list):
         return []
 
-    citations: list[str] = []
+    details: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for chunk in data:
+        if not isinstance(chunk, dict):
+            continue
         source, section = chunk.get("source", ""), chunk.get("section", "")
         key = f"{source}#{section}"
-        if source and section and key not in citations:
-            citations.append(key)
-    return citations
+        if not (source and section) or key in seen:
+            continue
+        seen.add(key)
+        retrieval_source = str(chunk.get("retrieval_source", "bm25"))
+        if retrieval_source not in ("bm25", "vector", "hybrid"):
+            retrieval_source = "bm25"
+        try:
+            score = float(chunk.get("score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        details.append(
+            {
+                "source": key,
+                "retrieval_source": retrieval_source,
+                "score": score,
+            }
+        )
+    return details
+
+
+def extract_citations(tool_name: str, tool_result: str) -> list[str]:
+    """从 search_knowledge_base 的结构化 JSON 结果中提取 "文件名#章节名"（保序去重）。"""
+    return [d["source"] for d in extract_citation_details(tool_name, tool_result)]
 
 
 def _get_provider(config: RunnableConfig) -> BaseLLMProvider:
@@ -260,18 +286,28 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]
             config=config,
         )
 
-        fresh = [
-            c for c in extract_citations(tool_name, result)
-            if c not in known_citations and c not in new_citations
+        all_details = extract_citation_details(tool_name, result)
+        fresh_details = [
+            d for d in all_details
+            if d["source"] not in known_citations and d["source"] not in new_citations
         ]
+        fresh = [d["source"] for d in fresh_details]
         if fresh:
             new_citations.extend(fresh)
             await adispatch_custom_event(
-                "citation", {"call_id": call["id"], "citations": fresh}, config=config
+                "citation",
+                {
+                    "call_id": call["id"],
+                    "citations": fresh,
+                    "citation_details": fresh_details,
+                },
+                config=config,
             )
 
-        # 更新证据账本并通过 stage 事件透传最新账本摘要
-        current_ledger = record_tool_evidence(current_ledger, tool_name, parsed_args, result, fresh)
+        # 更新证据账本并通过 stage 事件透传最新账本摘要（含 citation_details）
+        current_ledger = record_tool_evidence(
+            current_ledger, tool_name, parsed_args, result, fresh, fresh_details
+        )
         await adispatch_custom_event(
             "stage",
             {

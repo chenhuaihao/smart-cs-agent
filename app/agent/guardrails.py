@@ -11,7 +11,7 @@ v2.0 P1 护栏与证据账本模块：
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -78,6 +78,16 @@ class TicketEvidence(BaseModel):
     status: str = Field(default="待处理", description="工单状态")
 
 
+class CitationDetail(BaseModel):
+    """单条知识库引用详情（P2 新增，供前端展示关键词/语义/双路命中标签）"""
+    source: str = Field(..., description="条款来源，格式 '文件名#章节名'")
+    retrieval_source: Literal["bm25", "vector", "hybrid"] = Field(
+        default="bm25",
+        description="命中来源：bm25（仅关键词）/ vector（仅语义）/ hybrid（双路融合）",
+    )
+    score: float = Field(default=0.0, description="相关性得分（BM25 分或 RRF 融合分）")
+
+
 class EvidenceLedger(BaseModel):
     """
     本轮对话的证据账本：
@@ -90,6 +100,10 @@ class EvidenceLedger(BaseModel):
     citations: List[str] = Field(
         default_factory=list,
         description="命中的知识库条款来源列表，格式 '文件名#章节名'",
+    )
+    citation_details: List[CitationDetail] = Field(
+        default_factory=list,
+        description="命中的知识库条款详情（含 source / retrieval_source / score）",
     )
     tickets: Dict[str, TicketEvidence] = Field(
         default_factory=dict,
@@ -110,12 +124,20 @@ def merge_ledger(left: EvidenceLedger | dict | None, right: EvidenceLedger | dic
         if c not in merged_citations:
             merged_citations.append(c)
 
+    merged_details = list(base.citation_details)
+    seen_detail_sources = {d.source for d in merged_details}
+    for d in inc.citation_details:
+        if d.source not in seen_detail_sources:
+            merged_details.append(d)
+            seen_detail_sources.add(d.source)
+
     merged_tickets = dict(base.tickets)
     merged_tickets.update(inc.tickets)
 
     return EvidenceLedger(
         orders=merged_orders,
         citations=merged_citations,
+        citation_details=merged_details,
         tickets=merged_tickets,
     )
 
@@ -126,6 +148,7 @@ def record_tool_evidence(
     arguments: Any,
     tool_result: str,
     new_citations: list[str],
+    new_citation_details: list[dict[str, Any] | CitationDetail] | None = None,
 ) -> EvidenceLedger:
     """
     根据工具执行结果更新证据账本：
@@ -133,9 +156,16 @@ def record_tool_evidence(
         若返回 error（如订单不存在），同样标记该 order_id 已核查（exists=False），防止误判为"未查单"。
       - create_after_sales_ticket：当 success=True 时记录新建工单号与状态。
       - query_tickets：记录该订单下已有工单列表。
-      - search_knowledge_base：合并命中的 citations。
+      - search_knowledge_base：合并命中的 citations 与 citation_details。
     """
-    updated = merge_ledger(ledger, EvidenceLedger(citations=new_citations))
+    parsed_details = [
+        d if isinstance(d, CitationDetail) else CitationDetail.model_validate(d)
+        for d in (new_citation_details or [])
+    ]
+    updated = merge_ledger(
+        ledger,
+        EvidenceLedger(citations=new_citations, citation_details=parsed_details),
+    )
     args_dict = arguments if isinstance(arguments, dict) else _parse_json_dict(arguments)
     res_data = _parse_json_dict(tool_result)
 
