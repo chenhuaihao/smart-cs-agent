@@ -1,350 +1,204 @@
 """
 app/agent/core.py
 
-Agent 核心调度模块：实现多轮对话 + Function Calling 循环。
+Agent 核心调度（v2.0）：消费 LangGraph 事件流 → 统一事件协议 → 先落库后推送。
 
-职责：
-  - 从 chat_logs 加载最近 6 轮历史作为上下文
-  - 调用 DeepSeek（OpenAI 兼容接口）进行推理
-  - 根据 tool_calls 分发工具执行，回填 tool 角色消息，循环直到自然语言回复
-  - 解析 search_knowledge_base 工具结果，提取保序去重的 citations 溯源引用
-  - 统计耗时，将本轮对话持久化到 chat_logs 表
+统一事件协议（每条事件都先写入 chat_events 拿到 seq，再交给调用方）：
+  stage     阶段变化：received / thinking / tool_running
+  tool_call 单个工具执行完成：name / arguments / status / duration_ms
+  citation  新命中的知识库条款："文件名#章节名" 列表
+  token     模型文本增量（以 done.reply 为最终权威文本）
+  done      终态-成功：reply / tools_called / citations / ttft_ms / latency_ms
+  error     终态-失败：message + 兜底 reply，同样携带耗时指标
+
+对外入口：
+  stream_agent(...)  异步生成器，供 SSE 路由逐条推送
+  arun_agent(...)    异步收集版，返回 v1.0 同款 4 元组
+  run_agent(...)     同步兼容入口，签名与返回值与 v1.0 完全一致
 """
 
-import json
+import asyncio
 import logging
-import os
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, AsyncIterator
 
-from dotenv import load_dotenv
-from openai import OpenAI
-
-from app.agent.tools import TOOLS_SCHEMA, execute_tool
-from app.db.database import get_db_connection
-
-# 在模块加载时加载 .env，确保环境变量就绪
-load_dotenv()
+from app.agent.graph import (
+    LLM_ERROR_REPLY,
+    MAX_STEPS_FALLBACK_REPLY,
+    RECURSION_LIMIT,
+    agent_graph,
+    merge_citations,
+)
+from app.agent.memory import load_history, save_message
+from app.agent.prompts import build_system_prompt
+from app.db import events as event_store
+from app.llm.base import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# 客户端初始化（模块级单例，避免每次请求重复创建）
-# 优先读取 DEEPSEEK_* 环境变量，兼容 OPENAI_* 配置
-# ---------------------------------------------------------------------------
-
-_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-_BASE_URL = os.getenv("DEEPSEEK_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
-_MODEL_NAME = os.getenv("DEEPSEEK_MODEL") or os.getenv("OPENAI_MODEL_NAME", "deepseek-chat")
-
-if not _API_KEY:
-    # 缺少 API Key 时立刻报错，避免在实际请求时才触发隐晦的 401
-    raise EnvironmentError(
-        "缺少大模型 API Key 环境变量（DEEPSEEK_API_KEY 或 OPENAI_API_KEY）！"
-        "请在项目根目录的 .env 文件中配置真实的 API Key，参考 .env.example。"
-    )
-
-# 初始化 OpenAI 兼容客户端，timeout=30s 防止长时间挂起
-_client = OpenAI(
-    api_key=_API_KEY,
-    base_url=_BASE_URL,
-    timeout=30.0,
-)
-
-# ---------------------------------------------------------------------------
-# System Prompt：严格中文客服角色约束（含 RAG 强制检索规则）
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """你是"小智"，一名专业、友善的企业智能售后客服助理。
-
-【行为准则】
-1. **订单核验与政策咨询边界**：
-   - 只要用户在咨询中提及了具体订单号（无论其是否自述了签收日期、商品状态或时间差），**必须先调用 query_order 工具核实数据库真实订单与物流信息**，严禁仅凭用户单方自述直接给出售后结论。
-   - **政策咨询优先检索**：当用户咨询政策/规则（如7天价保、退换货条件、发票开具、保修质保、运费承担等）但**未提供订单号**时，**必须先调用 search_knowledge_base 检索并准确解答通用规则**！解答完毕后，可根据需要礼貌提示“如需核查具体订单的处理情况，请提供您的订单号”。**绝不能因为用户未提供订单号就直接拒答或跳过 search_knowledge_base 工具检索！**（仅在用户明确要求查询特定订单物流、特定工单或发起建单却未给单号时，才直接追问订单号）。
-2. **严禁捏造**：绝对不允许虚构不存在的订单信息、物流轨迹或工单记录。所有信息必须来源于工具查询结果。
-3. **异常物流检索与处置**：当查询订单后发现存在**超时未发货、物流停滞无更新、或用户怀疑丢件破损**等异常情况时，**必须主动调用 search_knowledge_base 检索物流异常处理与赔付规则**，严格依据店铺规则给出处置建议或协助建单，严禁仅凭常识口头安抚。
-4. **建单门槛与状态**：只有在用户**明确提出退货/换货/物流催单/售后咨询/转人工诉求**，并且**订单号和具体原因均已齐全**时，才可调用 create_after_sales_ticket 工具创建工单。新创建工单默认初始状态严格为【待处理】（需待售后专员审核跟进），严禁在回复中谎称工单已办结或已完成。条件不满足时，继续向用户收集信息。
-5. **结果解读**：收到工具返回的 JSON 后，将关键信息翻译为自然、易懂的中文回复给用户，不要直接暴露 JSON 原文。
-6. **工具错误处理**：若工具返回包含 "error" 字段，向用户说明情况并引导其提供正确信息，不要重复调用相同参数。
-7. **语气风格**：专业、简洁、有温度，使用礼貌敬语，避免过度啰嗦。
-8. **知识库优先与严禁虚假检索声明**：
-   - 凡是用户询问任何店铺规则、政策、服务权益、活动、分期/支付、换购、退换货条件、拆封退货、运费承担、质保期限（含各类配件质保）、保修流程、发货时效、退款到账时间、发票开具与7天价保、优惠券退款分摊、定制商品退换，以及遇到耳机（单耳无声/充电异常）或键盘等硬件故障排查时，**无论用户是否提供了订单号，都必须先实际调用 search_knowledge_base 工具检索，严禁凭借自身记忆直接作答，更严禁因未提供订单号而放弃知识库检索**。
-   - 遇到设备硬件故障（如耳机不响、键盘按键失灵）时，**先耐心引导用户按知识库指引进行自助排查与重置操作**；仅在用户反馈排查重置依然无效、且订单号与原因齐全时，再按政策时效协助发起换新或维修工单。
-   - 检索后，严格依据工具返回的条款原文作答。对客回复时，严禁暴露内部英文文件名或 `.md` 后缀（例如严禁输出 `return_policy.md`、`coupon_and_custom_rules.md` 等技术路径），应转化为自然友好的中文规则名称向用户说明（如"根据本店的定制商品售后规则"、"按照店铺7天无理由退货规定"）；精确的文件与章节溯源由系统后端自动记录，无需在聊天正文中展示。
-   - **绝对红线**：严禁在**未实际调用 search_knowledge_base** 的情况下，在回复中擅自声称"我检索了知识库"、"知识库中暂未找到"或"经查询知识库无此政策"等虚假表述！只有在确实发起了工具调用且返回结果为空或无匹配时，才可如实告知"本店知识库暂未收录相关说明"，并引导用户转接人工客服处理。
-
-【能力边界】
-- 你只处理售后相关问题（查订单、查工单、退换货、物流催单、转人工、政策咨询）。
-- 对于无关话题，礼貌说明你的职责范围并引导用户回到售后问题。
-"""
-
-# Function Calling 最大循环步数，防止模型异常导致死循环
-_MAX_STEPS = 6  # 知识库检索可能多消耗一步，从 5 调整到 6
-
-# 历史消息条数限制（最近 12 条 = 6 轮对话）
-_HISTORY_LIMIT = 12
+# 图内允许透传给客户端的自定义事件；其他内部事件一律丢弃，避免协议被意外扩散
+_FORWARD_EVENTS = {"stage", "tool_call", "citation", "token"}
+# 后台 turn 任务的强引用：asyncio 只持有 Task 弱引用，不保存会被 GC 提前回收
+_background_tasks: set["asyncio.Task[None]"] = set()
 
 
-# ---------------------------------------------------------------------------
-# 历史记录读取
-# ---------------------------------------------------------------------------
-
-def _load_history(session_id: str) -> list[dict]:
-    """
-    从 chat_logs 表读取指定 session 最近 _HISTORY_LIMIT 条对话记录，
-    按 id DESC 取最新的，然后反转为时间正序，作为多轮上下文拼入 messages。
-
-    只取 role 和 content 字段，tool_called / latency_ms 是内部统计，
-    不需要传给大模型。
-    """
-    sql = """
-    SELECT role, content
-    FROM chat_logs
-    WHERE session_id = ?
-    ORDER BY id DESC
-    LIMIT ?;
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, (session_id, _HISTORY_LIMIT))
-            rows = cursor.fetchall()
-    except Exception as e:
-        # 读取历史失败不影响主流程，降级为空历史继续处理
-        logger.error("_load_history 数据库异常 session_id=%s: %s", session_id, e)
-        return []
-
-    # 查出是倒序的（最新在前），反转后得到时间正序的历史消息
-    messages = [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
-    return messages
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
 
 
-# ---------------------------------------------------------------------------
-# 对话记录持久化
-# ---------------------------------------------------------------------------
+async def _emit(turn_id: str, event_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    """先落库拿 seq，再返回完整事件；SQLite 写入放线程池，避免阻塞事件循环。"""
+    return await asyncio.to_thread(event_store.append_event, turn_id, event_type, data)
 
-def _save_message(
+
+async def _run_turn(
+    turn_id: str,
     session_id: str,
-    role: str,
-    content: str,
-    tool_called: str | None = None,
-    latency_ms: int | None = None,
+    user_message: str,
+    started_at: float,
+    queue: "asyncio.Queue[dict[str, Any] | None]",
+    provider: BaseLLMProvider | None,
 ) -> None:
     """
-    将单条消息写入 chat_logs 表。
-    tool_called 仅在 assistant 消息时有值（逗号拼接的工具名列表）。
-    latency_ms 仅在 assistant 消息时有值（端到端耗时，毫秒）。
+    生产者：执行整轮推理并把"已落库"的事件放进队列。
+    作为独立后台任务运行——客户端断开不会中断推理，剩余事件照常落库，重连后可用 after_seq 补发。
     """
-    sql = """
-    INSERT INTO chat_logs (session_id, role, content, tool_called, latency_ms, created_at)
-    VALUES (?, ?, ?, ?, ?, ?);
-    """
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, (session_id, role, content, tool_called, latency_ms, created_at))
-            conn.commit()
-    except Exception as e:
-        # 持久化失败记录日志，不阻断接口响应（已生成的回复照常返回）
-        logger.error(
-            "_save_message 写入失败 session_id=%s role=%s: %s",
-            session_id, role, e,
-        )
-
-
-# ---------------------------------------------------------------------------
-# citations 提取辅助函数
-# ---------------------------------------------------------------------------
-
-def _extract_citations(tool_name: str, tool_result: str) -> list[str]:
-    """
-    从 search_knowledge_base 工具的返回 JSON 中提取溯源引用列表。
-    格式：["文件名#章节名", ...]，保序去重（先出现的优先）。
-
-    之所以在此直接解析结构化 JSON 而非依赖大模型在回复文本中输出：
-    - 结构化解析可靠性 100%，不受大模型措辞影响
-    - 不需要在 Prompt 中要求大模型格式化输出，减少 Prompt 复杂度
-    """
-    # 仅对知识库检索工具提取 citations，其他工具忽略
-    if tool_name != "search_knowledge_base":
-        return []
-
-    try:
-        data = json.loads(tool_result)
-    except json.JSONDecodeError:
-        # 工具返回格式异常（如包含 error 字段的非列表 JSON），直接跳过
-        return []
-
-    if not isinstance(data, list):
-        # 返回 {"error": ...} 或其他非列表结构时，无可提取的 citations
-        return []
-
-    # 保序去重：用 seen set 判断重复，用 list 保序
-    seen: set[str] = set()
+    ttft_ms: int | None = None
+    tools_called: list[str] = []
     citations: list[str] = []
-    for chunk in data:
-        source = chunk.get("source", "")
-        section = chunk.get("section", "")
-        if source and section:
-            key = f"{source}#{section}"
-            if key not in seen:
-                seen.add(key)
-                citations.append(key)
+    final_state: dict[str, Any] = {}
+    status, final_type, error = event_store.TURN_COMPLETED, "done", None
+    cancelled = False
 
-    return citations
+    try:
+        await queue.put(await _emit(turn_id, "stage", {"stage": "received", "session_id": session_id}))
+
+        history = await asyncio.to_thread(load_history, session_id)
+        messages = [{"role": "system", "content": build_system_prompt()}, *history,
+                    {"role": "user", "content": user_message}]
+        config: dict[str, Any] = {"recursion_limit": RECURSION_LIMIT, "configurable": {}}
+        if provider is not None:
+            config["configurable"]["provider"] = provider
+
+        async for ev in agent_graph.astream_events({"messages": messages, "steps": 0}, config=config, version="v2"):
+            if ev["event"] == "on_custom_event" and ev["name"] in _FORWARD_EVENTS:
+                name, data = ev["name"], ev["data"]
+                if name == "token" and ttft_ms is None:
+                    ttft_ms = _elapsed_ms(started_at)  # 首 token 相对请求开始的耗时
+                elif name == "tool_call":
+                    tools_called.append(data["name"])
+                elif name == "citation":
+                    citations = merge_citations(citations, data["citations"])
+                await queue.put(await _emit(turn_id, name, data))
+            elif ev["event"] == "on_chain_end" and not ev.get("parent_ids"):
+                # parent_ids 为空 = 根图结束，output 即最终 AgentState
+                final_state = ev["data"].get("output") or {}
+
+        reply = final_state.get("final_reply")
+        if reply is None:
+            reply = MAX_STEPS_FALLBACK_REPLY  # 理论不可达：图结束却无回复时兜底，绝不返回 None
+        tools_called = final_state.get("tools_called", tools_called)
+        citations = final_state.get("citations", citations)
+    except asyncio.CancelledError:
+        # 进程关闭等场景任务被取消：仍要把 turn 标记为 failed，避免补发方永远看到 running
+        cancelled = True
+        reply, status, final_type, error = LLM_ERROR_REPLY, event_store.TURN_FAILED, "error", "cancelled"
+    except Exception as e:
+        # 模型调用失败 / 图执行异常：与 v1.0 一致返回友好兜底文案，详细堆栈只进日志
+        logger.exception("turn 执行失败 turn_id=%s session_id=%s", turn_id, session_id)
+        reply, status, final_type = LLM_ERROR_REPLY, event_store.TURN_FAILED, "error"
+        error = f"{type(e).__name__}: {e}"
+
+    latency_ms = _elapsed_ms(started_at)
+    try:
+        # 与 v1.0 一致：成功或兜底都写入 chat_logs，保证同 session 多轮记忆连续
+        await asyncio.to_thread(save_message, session_id, "user", user_message)
+        await asyncio.to_thread(
+            save_message, session_id, "assistant", reply,
+            ",".join(tools_called) if tools_called else None, latency_ms,
+        )
+        payload: dict[str, Any] = {
+            "reply": reply, "tools_called": tools_called, "citations": citations,
+            "ttft_ms": ttft_ms, "latency_ms": latency_ms,
+        }
+        if final_type == "error":
+            payload["message"] = "Agent 处理请求时发生内部错误，请稍后重试。"  # 不向客户端暴露异常细节
+        record = await asyncio.to_thread(
+            event_store.finish_turn, turn_id, status, final_type, payload,
+            reply, tools_called, citations, ttft_ms, latency_ms, error,
+        )
+        await queue.put(record)
+    except Exception:
+        # 终态落库失败时不能推送"未落库"的事件（违背先写后推约定），只记录日志并结束流
+        logger.exception("终态事件落库失败 turn_id=%s", turn_id)
+    finally:
+        await queue.put(None)  # 流结束哨兵
+        logger.info(
+            "turn 结束 turn_id=%s status=%s tools=%s citations=%s ttft_ms=%s latency_ms=%d",
+            turn_id, status, tools_called, citations, ttft_ms, latency_ms,
+        )
+    if cancelled:
+        raise asyncio.CancelledError()
 
 
-# ---------------------------------------------------------------------------
-# 核心 Agent 入口
-# ---------------------------------------------------------------------------
+async def stream_agent(
+    session_id: str,
+    user_message: str,
+    turn_id: str | None = None,
+    started_at: float | None = None,
+    provider: BaseLLMProvider | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """
+    流式执行一轮对话，逐条产出已落库的事件 {turn_id, seq, type, data, created_at}。
+    turn_id 可由路由层预先创建（便于在响应头返回、并在建 turn 失败时直接返回 500）。
+    """
+    started_at = started_at if started_at is not None else time.monotonic()
+    if turn_id is None:
+        turn_id = await asyncio.to_thread(event_store.create_turn, session_id, user_message)
+
+    queue: "asyncio.Queue[dict[str, Any] | None]" = asyncio.Queue()
+    task = asyncio.create_task(_run_turn(turn_id, session_id, user_message, started_at, queue, provider))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    try:
+        while (item := await queue.get()) is not None:
+            yield item
+    finally:
+        # 消费方提前退出（客户端断开）时不取消任务：让推理跑完并落库，供断线补发
+        if not task.done():
+            logger.info("客户端提前断开 turn_id=%s，后台继续执行，可通过 after_seq 补发", turn_id)
+
+
+async def arun_agent(
+    session_id: str, user_message: str, provider: BaseLLMProvider | None = None
+) -> tuple[str, list[str], int, list[str]]:
+    """异步收集版：消费完整事件流，从终态事件取结果，返回 (reply, tools_called, latency_ms, citations)。"""
+    started_at = time.monotonic()
+    final: dict[str, Any] | None = None
+    async for event in stream_agent(session_id, user_message, started_at=started_at, provider=provider):
+        if event["type"] in ("done", "error"):
+            final = event["data"]
+
+    if final is None:
+        # 终态事件落库失败的极端情况：仍返回兜底 4 元组，保持接口契约
+        return LLM_ERROR_REPLY, [], _elapsed_ms(started_at), []
+    return final["reply"], final["tools_called"], final["latency_ms"], final["citations"]
+
 
 def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int, list[str]]:
     """
-    执行一轮完整的 Agent 推理（含多步 Function Calling 循环）。
-
-    流程：
-      1. 读取历史消息组装 messages
-      2. 进入循环（最多 _MAX_STEPS 步）：
-         a. 调用大模型
-         b. 若返回 tool_calls → 执行工具 → 回填 tool 角色消息 → 继续下一轮
-            如果工具是 search_knowledge_base，同步解析返回结果提取 citations
-         c. 若 finish_reason == "stop" → 输出最终回复，退出循环
-      3. 计算端到端耗时
-      4. 将用户输入和最终回复持久化到 chat_logs
-      5. 返回 (reply, tools_called, latency_ms, citations)
-
-    参数：
-      session_id   - 会话唯一标识，用于读取/写入历史记录
-      user_message - 用户本轮输入内容
-
-    返回：
-      reply        - 助手最终自然语言回复
-      tools_called - 本轮实际调用的工具名列表（可能为空）
-      latency_ms   - 端到端耗时（毫秒）
-      citations    - 本轮命中知识库条款的去重来源列表（格式: "文件名#章节名"）
+    v1.0 同步兼容入口：签名与返回值 (reply, tools_called, latency_ms, citations) 保持不变，
+    同一 session_id 自动携带最近 6 轮上下文。供脚本 / 评测等同步场景调用。
     """
-    start_time = time.monotonic()
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # 当前线程没有事件循环（常规同步调用）：直接新建循环执行
+        return asyncio.run(arun_agent(session_id, user_message))
 
-    # 1. 加载历史 + 构建 messages（动态注入当前系统日期 + system + history + 本轮用户输入）
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    dynamic_system_prompt = (
-        f"{_SYSTEM_PROMPT}\n"
-        f"【系统运行环境】\n"
-        f"- 当前系统日期：{today_str}（用于精准核算订单签收或购买距今经过的天数，准确判断是否在 7天无理由退货、15天质量换新或官方质保期限内）。"
-    )
-
-    history = _load_history(session_id)
-    messages: list[dict] = [{"role": "system", "content": dynamic_system_prompt}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_message})
-
-    tools_called: list[str] = []  # 记录本轮调用的工具名
-    citations: list[str] = []     # 记录知识库命中条款来源（保序去重）
-    final_reply: str | None = None
-
-    logger.info(
-        "run_agent 开始 session_id=%s history_len=%d user_message='%s'",
-        session_id, len(history), user_message[:50],
-    )
-
-    # 2. Function Calling 循环
-    for step in range(_MAX_STEPS):
-        logger.info("run_agent step=%d messages_count=%d", step, len(messages))
-
-        try:
-            response = _client.chat.completions.create(
-                model=_MODEL_NAME,
-                messages=messages,          # type: ignore[arg-type]
-                tools=TOOLS_SCHEMA,         # type: ignore[arg-type]
-                tool_choice="auto",         # 由模型自主决定是否调用工具
-            )
-        except Exception as e:
-            # 大模型 API 调用失败（网络超时、鉴权失败等），立即返回友好提示
-            logger.error("run_agent: 大模型 API 调用失败 step=%d: %s", step, e)
-            final_reply = "抱歉，我暂时无法连接到后端服务，请稍后重试。如有紧急问题，可联系人工客服。"
-            break
-
-        assistant_message = response.choices[0].message
-        finish_reason = response.choices[0].finish_reason
-
-        logger.info("run_agent step=%d finish_reason=%s", step, finish_reason)
-
-        # 2a. 大模型请求调用工具（通过 message.tool_calls 判断，兼容 DeepSeek 格式）
-        if assistant_message.tool_calls:
-            # 将 assistant 的完整消息（含 tool_calls）回填到 messages
-            messages.append(assistant_message)  # type: ignore[arg-type]
-
-            # 逐个执行工具调用，每个调用结果以 tool 角色追加到 messages
-            for tool_call in assistant_message.tool_calls:
-                tool_name = tool_call.function.name
-                arguments = tool_call.function.arguments  # JSON 字符串
-
-                logger.info(
-                    "run_agent: 调用工具 tool_name=%s call_id=%s",
-                    tool_name, tool_call.id,
-                )
-
-                # 执行工具，execute_tool 内部保证不抛异常
-                tool_result = execute_tool(tool_name, arguments)
-                tools_called.append(tool_name)
-
-                # 若工具为知识库检索，直接解析结构化结果提取 citations（不依赖大模型输出）
-                # 保序去重：已在 _extract_citations 内部处理，这里做跨调用去重
-                new_citations = _extract_citations(tool_name, tool_result)
-                for c in new_citations:
-                    if c not in citations:
-                        citations.append(c)
-
-                # 将工具返回结果以 tool 角色追加（DeepSeek 兼容 OpenAI tool 消息格式）
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result,
-                })
-
-                logger.info("run_agent: 工具结果 tool_name=%s result='%s'", tool_name, tool_result[:100])
-
-            # 工具执行完毕，继续循环让模型处理工具结果
-            continue
-
-        # 2b. 模型返回自然语言回复（finish_reason == "stop"）
-        if finish_reason == "stop":
-            final_reply = assistant_message.content or ""
-            break
-
-        # 2c. 其他意外 finish_reason（如 "length" 截断），取当前 content 兜底
-        logger.warning("run_agent: 意外 finish_reason=%s，取当前 content 兜底", finish_reason)
-        final_reply = assistant_message.content or ""
-        break
-
-    # 3. 达到最大步数仍未生成最终回复：友好兜底，避免返回 None
-    if final_reply is None:
-        logger.warning(
-            "run_agent: 达到最大步数 %d 仍未生成最终回复 session_id=%s",
-            _MAX_STEPS, session_id,
-        )
-        final_reply = (
-            "非常抱歉，我在处理您的请求时遇到了一点复杂情况，未能及时给出回复。"
-            "建议您稍后重试，或联系人工客服为您进一步处理。"
-        )
-
-    # 4. 计算端到端耗时（毫秒）
-    latency_ms = int((time.monotonic() - start_time) * 1000)
-
-    # 5. 持久化：先写用户输入，再写助手回复（含工具调用列表和耗时）
-    _save_message(session_id, "user", user_message)
-    _save_message(
-        session_id,
-        "assistant",
-        final_reply,
-        tool_called=",".join(tools_called) if tools_called else None,
-        latency_ms=latency_ms,
-    )
-
-    logger.info(
-        "run_agent 完成 session_id=%s tools_called=%s citations=%s latency_ms=%d",
-        session_id, tools_called, citations, latency_ms,
-    )
-
-    return final_reply, tools_called, latency_ms, citations
+    # 已处于运行中的事件循环内（如在 async 函数里误调同步入口）：asyncio.run 会报错，
+    # 因此放到独立线程的新循环中执行（Provider 已按事件循环隔离客户端，可安全跨循环）
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, arun_agent(session_id, user_message)).result()
