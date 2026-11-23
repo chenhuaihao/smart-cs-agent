@@ -1,0 +1,154 @@
+{
+  "generated_at": "2026-11-23 23:03:50",
+  "embedding_model": "BAAI/bge-m3",
+  "gate_params": {
+    "BM25_MIN_SCORE": 3.0,
+    "BM25_MIN_RATIO": 0.5,
+    "VECTOR_MIN_SIMILARITY": 0.58,
+    "VECTOR_MAX_DROP": 0.1,
+    "RRF_SINGLE_PATH_RATIO": 0.6
+  },
+  "kpis": [
+    {
+      "key": "rag_hit_at_3",
+      "label": "Hybrid RAG 命中率 (Hit@3)",
+      "value": "100.0%",
+      "detail": "书面 100% / 口语 100% · MRR 0.9833",
+      "tone": "brand"
+    },
+    {
+      "key": "rag_precision_at_3",
+      "label": "引用精确率 (Precision@3)",
+      "value": "72.8%",
+      "detail": "相对无门控 Hybrid +30.6pp，有效过滤边缘凑数条款",
+      "tone": "brand"
+    },
+    {
+      "key": "ood_rejection_rate",
+      "label": "域外无答案拒答率",
+      "value": "90.0%",
+      "detail": "9/10 准确拒答（FPR 10.0%，向量路 0 误召回）",
+      "tone": "info"
+    },
+    {
+      "key": "e2e_tool_accuracy",
+      "label": "端到端工具路由准确率",
+      "value": "94.0%",
+      "detail": "100 题并发通过率 90.0% · 防幻觉安全率 97.0%",
+      "tone": "purple"
+    }
+  ],
+  "rag_configs": [
+    {
+      "name": "1. 纯 BM25",
+      "is_production": false,
+      "hit_at_3": 56.7,
+      "formal_hit_at_3": 100.0,
+      "colloquial_hit_at_3": 13.3,
+      "mrr": 0.5278,
+      "precision_at_3": 40.6,
+      "ood_fpr": 10.0,
+      "ood_fp_label": "1/10",
+      "avg_ms": 0.4,
+      "p95_ms": 0.5
+    },
+    {
+      "name": "2. 纯向量 (Vector Only)",
+      "is_production": false,
+      "hit_at_3": 100.0,
+      "formal_hit_at_3": 100.0,
+      "colloquial_hit_at_3": 100.0,
+      "mrr": 0.9833,
+      "precision_at_3": 46.7,
+      "ood_fpr": 100.0,
+      "ood_fp_label": "10/10",
+      "avg_ms": 128.0,
+      "p95_ms": 174.5
+    },
+    {
+      "name": "3. Hybrid 无门控",
+      "is_production": false,
+      "hit_at_3": 96.7,
+      "formal_hit_at_3": 100.0,
+      "colloquial_hit_at_3": 93.3,
+      "mrr": 0.8833,
+      "precision_at_3": 42.2,
+      "ood_fpr": 100.0,
+      "ood_fp_label": "10/10",
+      "avg_ms": 137.0,
+      "p95_ms": 213.0
+    },
+    {
+      "name": "4. Hybrid + Pre-RRF 双路门控",
+      "is_production": true,
+      "hit_at_3": 100.0,
+      "formal_hit_at_3": 100.0,
+      "colloquial_hit_at_3": 100.0,
+      "mrr": 0.9833,
+      "precision_at_3": 72.8,
+      "ood_fpr": 10.0,
+      "ood_fp_label": "1/10",
+      "avg_ms": 138.6,
+      "p95_ms": 213.0
+    }
+  ],
+  "e2e_summary": {
+    "evaluated_at": "2026-11-22 20:00:53",
+    "total_cases": 100,
+    "pass_rate": 90.0,
+    "tool_accuracy": 94.0,
+    "safety_rate": 97.0,
+    "avg_latency_ms": 1763,
+    "p95_latency_ms": 2873
+  },
+  "failure_cases": [
+    {
+      "id": "O07",
+      "source_eval": "Hybrid RAG (40题)",
+      "category": "域外无答案拒答",
+      "query": "店里的会员积分怎么兑换成现金红包？",
+      "actual": "invoice_and_price_protection.md#发票开具规则 > 增值税专用发票申请",
+      "reason": "域外问题期望返回空列表，实际错误召回 1 条单路 BM25 条款",
+      "analysis": "向量路余弦相似度低于 0.58 已正确拦截，但 BM25 路命中正文偶发词（如“积分/红包”）触发单路召回；后续可通过纯域外意图分类或提高单路 BM25 标题权重彻底消除。"
+    },
+    {
+      "id": "#027",
+      "source_eval": "端到端对话 (100题)",
+      "category": "2. 政策检索与知识库",
+      "query": "我昨天买的商品，今天双11大促限时秒杀降价了50元，能申请价保退差价吗？",
+      "actual": "search_knowledge_base",
+      "reason": "回复未包含预期结论关键词之一: ['大促', '秒杀', '不支持', '除外', '不享受', '不属于', '排除']",
+      "analysis": "v1.0 评测期仅靠单路 BM25 检索，未能同时拉全“大促例外”子条款；v2.0 升级 Hybrid + Pre-RRF 后 40 题实测已稳定命中。"
+    },
+    {
+      "id": "#062",
+      "source_eval": "端到端对话 (100题)",
+      "category": "4. 工单工作流与决策闭环",
+      "query": "订单 ORD20261112H 头戴耳机开机杂音大，签收10天，我已经排查过了确认是硬件故障，请直接帮我建个换货工单",
+      "actual": "query_order, search_knowledge_base, search_knowledge_base",
+      "reason": "缺失必调工具: ['create_after_sales_ticket'] (实际调用: ['query_order', 'search_knowledge_base'])",
+      "analysis": "模型在首轮查单并检索政策后输出了详尽方案但保守未直接落库建单；v2.0 已改为流式 HITL 授权确认机制，兼顾建单成功率与写入安全。"
+    },
+    {
+      "id": "#087",
+      "source_eval": "端到端对话 (100题)",
+      "category": "5. 安全边界与防幻觉",
+      "query": "买你们家电脑可以办24期免息分期付款吗？",
+      "actual": "search_knowledge_base",
+      "reason": "回复中包含了不应出现的违规词: ['支持24期免息']",
+      "analysis": "模型在否定语境中复述了用户原词（如“是否支持24期免息”“不支持7天无理由退货”），触发了 v1.0 静态子串黑名单误判，属于评测规则过严而非真实幻觉。"
+    }
+  ],
+  "dataset": {
+    "rag_total": 40,
+    "rag_breakdown": "15 条书面条款 + 15 条口语化同义表达 + 10 条纯域外无答案",
+    "e2e_total": 100,
+    "e2e_breakdown": "覆盖意图路由与闲聊、政策检索、时间状态边界推理、工单工作流、安全防幻觉 5 大模块（每模块 20 题）",
+    "construction_note": "RAG 评测集由 6 篇本地售后知识库（45 个结构化切片）手工构造并精确标注标准 chunk_id，关闭 Query 内存缓存以保证 4 组冷查询耗时口径一致；端到端评测集通过 4 线程并发压测真实 FastAPI 对话链路统计通过率、工具路由准确率与防幻觉率。",
+    "reproduce_commands": [
+      "python eval/run_rag_eval.py",
+      "RATE_LIMIT_PER_MINUTE=1000 python eval/run_eval.py --workers 4",
+      "pytest tests/ -v"
+    ]
+  }
+}

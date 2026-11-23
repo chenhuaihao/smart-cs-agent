@@ -2,6 +2,15 @@ fastapi>=0.110.0
 uvicorn>=0.28.0
 pydantic>=2.6.0
 python-dotenv>=1.0.0
-openai>=1.14.0
+openai>=1.40.0
 jieba>=0.42.1
 rank-bm25>=0.2.2
+# v2.0 P2：轻量本地向量持久化（Python 3.11/3.12 预编译轮子，不引入 torch / sentence-transformers，自定义在线 Embedding 向量）
+chromadb>=1.0.0,<2.0.0
+# v2.0 P0：LangGraph 状态机编排（仅用 StateGraph + 自定义事件，不引入 LangChain 链式封装）
+langgraph>=0.2.50,<0.4.0
+langchain-core>=0.3.20,<0.4.0
+# 测试与 HTTP 客户端
+httpx>=0.27.0
+pytest>=8.0.0
+pytest-asyncio>=0.24.0

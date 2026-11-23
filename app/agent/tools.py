@@ -160,8 +160,9 @@ def query_tickets(order_id: str) -> str:
 
 def search_knowledge_base(query: str) -> str:
     """
-    检索本地售后规则知识库，返回命中条款的 JSON 列表。
-    每条包含：source（来源文件）、section（章节）、content（条款原文）、score（相关性分）。
+    执行 Hybrid RAG（BM25 + Chroma 向量 + RRF 融合；无 Key 或异常时自动降级纯 BM25）检索本地售后知识库。
+    每条包含：chunk_id、source（来源文件）、section（章节）、content（条款原文）、score（相关性分）、
+    retrieval_source（bm25 / vector / hybrid）。
     若无命中返回空列表 JSON，不报错，让大模型诚实告知用户知识库未覆盖该问题。
 
     边界处理：

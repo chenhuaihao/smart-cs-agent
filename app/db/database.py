@@ -12,6 +12,9 @@ load_dotenv()
 DEFAULT_DB_PATH = "./data/smart_cs.db"
 DB_PATH = os.getenv("SQLITE_DB_PATH", DEFAULT_DB_PATH)
 
+# SQLite 写锁等待上限（毫秒）
+_BUSY_TIMEOUT_MS = 15000
+
 
 def _ensure_db_dir_exists(db_path: str) -> None:
     """
@@ -37,6 +40,12 @@ def get_db_connection() -> Generator[sqlite3.Connection, None, None]:
     conn = sqlite3.connect(DB_PATH, timeout=15.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
+        # WAL 模式：写事务不阻塞读，SSE 流式写事件的同时，断线补发接口可以并发读取事件表。
+        # journal_mode 是库文件级持久设置，已是 WAL 时再次执行为空操作，开销可忽略。
+        conn.execute("PRAGMA journal_mode=WAL;")
+        # busy_timeout：遇到写锁时最多等待 15 秒再报 database is locked，与上方 timeout 保持一致
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS};")
+
         yield conn
     except Exception:
         conn.rollback()
@@ -50,10 +59,12 @@ def init_db() -> None:
     初始化数据表结构（幂等设计）：
     使用 CREATE TABLE IF NOT EXISTS，服务每次启动或重复执行均安全无副作用。
     
-    包含三张核心业务表：
+    包含五张核心业务表：
     - orders: 模拟电商订单数据
     - tickets: 售后工单流转记录
-    - chat_logs: 完整对话记录与工具调用延迟追踪
+    - chat_logs: 完整对话记录与工具调用延迟追踪（多轮上下文记忆来源）
+    - chat_turns: v2.0 单轮请求的状态与汇总指标（ttft_ms / latency_ms）
+    - chat_events: v2.0 单轮请求内的有序事件流（SSE 推送与断线补发的数据源）
     """
     create_orders_sql = """
     CREATE TABLE IF NOT EXISTS orders (
@@ -92,11 +103,68 @@ def init_db() -> None:
     );
     """
 
+    # v2.0：一次用户请求 = 一个 turn；status 取值 running / completed / failed
+    create_chat_turns_sql = """
+    CREATE TABLE IF NOT EXISTS chat_turns (
+        turn_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_message TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        reply TEXT,
+        tools_called TEXT,
+        citations TEXT,
+        ttft_ms INTEGER,
+        latency_ms INTEGER,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        finished_at TEXT
+    );
+    """
+
+    # v2.0：turn 内的有序事件流。UNIQUE(turn_id, seq) 是 seq 严格递增的最后一道防线：
+    # 即使应用层计算 seq 出现并发竞争，重复 seq 也会被数据库直接拒绝，而不会静默写入
+    create_chat_events_sql = """
+    CREATE TABLE IF NOT EXISTS chat_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (turn_id, seq),
+        FOREIGN KEY (turn_id) REFERENCES chat_turns (turn_id)
+    );
+    """
+
+    # 按会话回查历史 turn 的索引（chat_events 的查询已被 UNIQUE 约束自带的索引覆盖）
+    create_turns_index_sql = """
+    CREATE INDEX IF NOT EXISTS idx_chat_turns_session ON chat_turns (session_id, created_at);
+    """
+
+    # v2.0 P1：高风险写工具（如 create_after_sales_ticket）HITL 待确认持久化表
+    create_chat_approvals_sql = """
+    CREATE TABLE IF NOT EXISTS chat_approvals (
+        turn_id TEXT PRIMARY KEY,
+        tool_name TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        args TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'waiting_approval',
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        FOREIGN KEY (turn_id) REFERENCES chat_turns (turn_id)
+    );
+    """
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(create_orders_sql)
         cursor.execute(create_tickets_sql)
         cursor.execute(create_chat_logs_sql)
+        cursor.execute(create_chat_turns_sql)
+        cursor.execute(create_chat_events_sql)
+        cursor.execute(create_turns_index_sql)
+        cursor.execute(create_chat_approvals_sql)
         conn.commit()
 
 

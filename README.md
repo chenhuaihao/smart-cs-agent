@@ -1,301 +1,233 @@
-# Smart CS Agent - 企业智能售后与工单分流 Agent
+# Smart CS Agent v2.0 - 企业智能售后与工单分流 Agent
 
 <p align="center">
   <b>面向真实电商售后与工单流转场景的生产级智能客服系统</b><br>
-  轻量透明 · 拒绝黑盒 · 状态机闭环 · 生产就绪
+  SSE 事务事件流 · 证据账本硬校验 · 高风险写操作 HITL · Hybrid RAG + Pre-RRF 双路门控
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11+-blue.svg" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/Python-3.12-blue.svg" alt="Python 3.12">
   <img src="https://img.shields.io/badge/FastAPI-0.110+-009688.svg" alt="FastAPI">
-  <img src="https://img.shields.io/badge/Model-DeepSeek--V3-4D6BFE.svg" alt="DeepSeek">
-  <img src="https://img.shields.io/badge/Docker-Ready-2496ED.svg" alt="Docker">
-  <img src="https://img.shields.io/badge/Eval_Pass_Rate-90.0%25-brightgreen.svg" alt="Pass Rate">
+  <img src="https://img.shields.io/badge/React-19_+_TypeScript-61DAFB.svg" alt="React 19">
+  <img src="https://img.shields.io/badge/Hybrid_RAG-Hit@3_100%25-brightgreen.svg" alt="Hybrid RAG Hit@3 100%">
+  <img src="https://img.shields.io/badge/Docker-Multi--Stage-2496ED.svg" alt="Docker Multi-Stage">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
+</p>
+
+<p align="center">
+  🌐 <a href="http://8.166.124.35:8000/"><b>在线体验工作台</b></a> ·
+  📊 <a href="http://8.166.124.35:8000/#eval"><b>在线评测报告页（实时读取 eval_summary.json）</b></a> ·
+  📖 <a href="http://8.166.124.35:8000/docs"><b>Swagger API 文档</b></a>
 </p>
 
 ---
 
-## 📌 项目定位
+## 📊 核心评测结果速览（第一屏指标）
 
-`smart-cs-agent` 是一套面向电商平台与企业客户服务真实业务场景的**生产级轻量智能售后 Agent**。系统深度贯穿 **「意图路由识别 $\to$ 订单/物流核验 $\to$ 售后政策条款检索 $\to$ 时间与状态边界推理 $\to$ 售后工单创建与人机协同流转」** 的完整业务闭环。
+> 所有指标均由 [`eval/run_rag_eval.py`](eval/run_rag_eval.py) 自动输出至 [`eval/eval_summary.json`](eval/eval_summary.json) 并由网站「[评测报告](http://8.166.124.35:8000/#eval)」标签页实时渲染，与完整报告 [`eval/rag_eval_report.md`](eval/rag_eval_report.md) 严格同源。
 
-### 💡 核心设计哲学
-在当前大模型应用开发泛滥依赖重型框架（如 LangChain、LlamaIndex 等）的背景下，本项目坚持**生产透明与工程可控原则**：
-- **拒绝框架黑盒**：不引入 LangChain、LlamaIndex 或复杂 ORM（SQLAlchemy），业务逻辑直白透明，方便技术面试逐行追问与生产故障排查定位。
-- **真实业务读写**：摒弃单纯问答玩具（Toy Demo），基于原生 SQLite 参数化事务实现订单底库核验与工单状态持久化流转。
-- **白盒安全审计**：每次思考、Function Calling 工具分发、参数校验、溯源引用（Citations）与毫秒级延迟均被完整结构化沉淀。
+### 1. 四种检索配置量化对比（40 题真实 `BAAI/bge-m3` 冷查询实测）
 
----
+| 检索配置 | Hit@3（30题） | 书面 Hit@3 | 口语 Hit@3 | MRR | Precision@3 | 域外误召回率 FPR（10题） | 平均 / P95 耗时 (ms) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1. 纯 BM25** | 56.7% | 100.0% | 13.3% | 0.5278 | 40.6% | 10.0% (1/10) | 0.4 / 0.5 |
+| **2. 纯向量 (Vector Only)** | 100.0% | 100.0% | 100.0% | 0.9833 | 46.7% | 100.0% (10/10) | 128.0 / 174.5 |
+| **3. Hybrid 无门控** | 96.7% | 100.0% | 93.3% | 0.8833 | 42.2% | 100.0% (10/10) | 137.0 / 213.0 |
+| **4. Hybrid + Pre-RRF 双路门控**（生产默认） | **100.0%** | **100.0%** | **100.0%** | **0.9833** | **72.8%** | **10.0% (1/10)** | **138.6 / 213.0** |
 
-## 🚀 核心工程亮点
+### 2. 端到端 100 题并发业务评测核心指标
 
-1. **Agentic RAG 与 BM25 词元覆盖度降噪**
-   - 知识库按 Markdown 二级/三级标题进行细粒度语义物理切块；
-   - 采用 `jieba.cut_for_search` 搜索引擎模式分词，结合 `rank_bm25 (BM25Okapi)` 算法建立内存倒排索引；
-   - **创新引入词元覆盖度校验（Token Overlap Ratio）与动态分数阈值**：对客问答时杜绝跨品类误召回与低置信度虚假条款注入，保障回答精准可靠。
+| 总体通过率 (Pass Rate) | 工具路由准确率 (Tool Accuracy) | 防幻觉安全率 (Safety Rate) | 平均 / P95 端到端耗时 | 在线评测明细 |
+| :---: | :---: | :---: | :---: | :---: |
+| **90.0%** (90/100) | **94.0%** (94/100) | **97.0%** (97/100) | **1763 / 2873 ms** | 👉 [查看在线评测报告](http://8.166.124.35:8000/#eval) |
 
-2. **真实业务读写闭环与时间边界推理**
-   - 针对售后核心场景（7天无理由退货、15天换货、1-2年质保期、物流催单、发票重开等）建立严密的日期时效与状态机判定；
-   - 针对**拆封损毁、个性化刻字定制商品、大促秒杀价保排除**等特殊边界条件执行刚性约束，杜绝客服胡乱承诺。
-
-3. **人机协同工单状态流转（Human-in-the-loop）**
-   - 原生 SQLite 事务保障工单生命周期：`待处理` $\to$ `处理中` $\to$ `已完结 / 已拒绝`；
-   - 工具端防重设计：支持对客反问补充信息、前置订单真实性校验，工单建立后生成唯一追踪号 `TKT{YYYYMMDD}-{HEX}`。
-
-4. **白盒全链路追踪与调试工作台**
-   - 自带原生轻量级可视化单页应用（SPA），直连 `/api/chat`、`/api/orders`、`/api/tickets` 与 `/api/knowledge/search`；
-   - 对话过程实时渲染推理工具链（`tools_called`）、引用条款来源（`citations`）、端到端耗时（`latency_ms`）。
-
-5. **轻量级内存滑动窗口限流防刷**
-   - 纯 Python 标准库实现 60 秒内存滑动窗口限流，默认限制单 IP 每分钟最多 15 次请求（`RATE_LIMIT_PER_MINUTE` 可配置）；
-   - 自动解析 `X-Forwarded-For` 反向代理真实 IP，超限返回 HTTP `429 Too Many Requests` 及友好重试指引，防止公网部署 API Key 额度被刷爆。
+> **关键结论**：相比纯 BM25，Hybrid + Pre-RRF 将口语化 Hit@3 从 **13.3% 提升至 100.0%**；相比无门控 Hybrid，将 **Precision@3 从 42.2% 提升至 72.8%（+30.6pp）**、域外误召回率从 **100.0% 降至 10.0%（-90.0pp）**；生产环境开启 256 容量 Query Embedding LRU 缓存后，高频问法耗时可降至 **~4.6 ms**。
 
 ---
 
-## 🏗️ 系统整体架构
+## 📌 项目定位与 v2.0 演进
+
+`smart-cs-agent` 是一套面向电商平台与企业客服真实业务场景的**生产级轻量智能售后 Agent**。v2.0 在保持轻量、透明、可逐行审计的基础上，围绕**可靠性、可观测性与检索精度**完成全面升级：
+
+- **可恢复 SSE 事务事件流**：基于 SQLite 事务日志（`chat_turns` / `chat_events`）先落库分配严格递增 `seq` 再推流；前端维护 `turn_id + lastSeq + processedSeqs` 幂等去重，流中断后自动通过 `GET /api/chat/turns/{turn_id}/events?after_seq=...` 无缝补发。
+- **证据账本与代码级防幻觉护栏**：`LangGraph StateGraph` 显式编排 `agent → tools → policy_verifier → fallback` 闭环；工具执行结果写入 `EvidenceLedger`，由规则校验器硬拦截“未查单编造物流状态”或“未调用工具谎称已建单”，超限或超时安全降级。
+- **高风险写操作 HITL 人工确认**：流式模式下触发 `create_after_sales_ticket` 时自动挂起落库、推送 `approval_required` 事件并在对话流中渲染授权卡片，由用户显式点击「确认建单 / 取消建单」调用 `POST /api/chat/turns/{turn_id}/approve` 续流收尾。
+- **Hybrid RAG + Pre-RRF 双路原生门控**：融合 `jieba + rank-bm25` 词法检索与 `BAAI/bge-m3 + Chroma` 本地持久化语义检索，经 Pre-RRF 双路原生相关性门控与 RRF（$k=60$）单路尾部裁剪，在 40 题实测中实现 **100% Hit@3、0.9833 MRR、72.8% Precision@3、10% 域外误召回率**；无 Key 或在线超时自动降级纯 BM25，并配备进程级启动预热 + 256 容量 Query Embedding LRU 缓存（缓存命中耗时 ~4.6 ms）。
+- **React + TypeScript + Vite 控制台**：集成智能客服流式工作台、严格单向状态机工单看板（`待处理 → 处理中 → 已完成`，终态禁逆转）以及订单与 Hybrid RAG 实时联调面板。
+
+---
+
+## 🏗️ v2.0 系统架构
 
 ```text
-               +-------------------------------------------------------+
-               |           Client Layer (Browser / Webhook)            |
-               |       可视化售后工作台 / HTTP API 客户端 / 自动化评测集      |
-               +---------------------------+---------------------------+
-                                           | HTTP /api/*
-                                           v
-+-----------------------------------------------------------------------------------------+
-|                               FastAPI Application Gateway                               |
-|  +-----------------------------------------------------------------------------------+  |
-|  | [Core Limiter] 内存滑动窗口防刷限流器 (60s 窗口 / X-Forwarded-For 透传识别 / HTTP 429) |  |
-|  +-----------------------------------------------------------------------------------+  |
-|          |                                   |                                |         |
-|          v                                   v                                v         |
-|   /api/orders (查询)                  /api/chat (核心对话)             /api/tickets (工单) |
-+----------------------------------------------+------------------------------------------+
-                                               |
-                                               v
-+-----------------------------------------------------------------------------------------+
-|                                Agent Core Orchestrator                                  |
-|  +-----------------------------------------------------------------------------------+  |
-|  | System Prompt 守则注入 (对客话术规范 / 越狱与注入防御 / 防幻觉约束 / 业务裁决准则)      |  |
-|  | 会话历史滑动窗口加载 (chat_logs 最近 6 轮白盒追踪)                                 |  |
-|  | OpenAI 兼容协议驱动 (DeepSeek-V3 / Qwen / GPT-4o 零成本热切换)                        |  |
-|  +-------------------------------------------+---------------------------------------+  |
-|                                              | Function Calling (tool_calls 调度循环)    |
-|                                              v                                          |
-|                          +---------------------------------------+                      |
-|                          |           Tools Registry              |                      |
-|                          +-------------------+-------------------+                      |
-|                                              |                                          |
-|                     +------------------------+-----------------------+                  |
-|                     |                                                |                  |
-|                     v                                                v                  |
-|      [search_knowledge_base]                          [query_order / tickets]           |
-|   +------------------------------------+           +---------------------------------+  |
-|   | Local Agentic RAG Engine           |           | SQLite Native Storage           |  |
-|   | - Markdown 标题物理分块            |           | - 参数化原生 SQL 防注入         |  |
-|   | - Jieba 搜索引擎分词               |           | - orders 订单数据 (500+ 底库)   |  |
-|   | - Rank-BM25 (BM25Okapi) 排序       |           | - tickets 售后工单流转记录      |  |
-|   | - 词元覆盖度校验 (Overlap Ratio)   |           | - chat_logs 全链路白盒审计      |  |
-|   +------------------------------------+           +---------------------------------+  |
-+-----------------------------------------------------------------------------------------+
+           +-------------------------------------------------------------------+
+           |        Frontend Console (React 19 + TypeScript + Vite)            |
+           |  ChatWorkspace (SSE+seq去重) | TicketBoard | InspectorDrawer      |
+           +---------------------------------+---------------------------------+
+                                             | HTTP / SSE (/api/*)
+                                             v
++---------------------------------------------------------------------------------------------+
+|                             FastAPI Gateway & Demo Guardrails                               |
+|  - 对话滑动窗口限流 (RATE_LIMIT_PER_MINUTE) + 每日全局熔断 (DAILY_CHAT_LIMIT)                 |
+|  - 业务接口分桶 IP 限流 (读 60/min, 写 20/min) + 重置双层保护 (DEMO_ADMIN_TOKEN / 5min冷却)   |
+|  POST /api/chat/stream | GET /turns/{id}/events | POST /turns/{id}/approve | /orders|/tickets|
++--------------------------------------------+------------------------------------------------+
+                                             |
+                                             v
++---------------------------------------------------------------------------------------------+
+|                       LangGraph StateGraph + Transactional Event Store                      |
+|                                                                                             |
+|   START -> agent --(tool_calls)--> tools --(高风险写操作 HITL 挂起)--> approval_required     |
+|              |                       |                                    | (/approve)      |
+|              |                       +--> 更新 EvidenceLedger + 派发 citation_details        |
+|              v                                                                              |
+|        policy_verifier --(pass)--> END (done 落库)                                          |
+|              |--(fail & retry<=2)--> agent 重写                                             |
+|              +--(fail>2 / 超时 / 步数耗尽)--> fallback -> END                               |
++--------------------------------------------+------------------------------------------------+
+                                             |
+                   +-------------------------+-------------------------+
+                   |                                                   |
+                   v                                                   v
+   +------------------------------------------+      +----------------------------------------+
+   |       Hybrid RAG Engine (低内存无Torch)   |      |        SQLite Native Storage (WAL)     |
+   | - 词法路: jieba + BM25 (绝对+0.5相对门控) |      | - orders (24条标准覆盖全周期种子单)     |
+   | - 语义路: bge-m3 + Chroma 持久化 (指纹复用)|      | - tickets (严格单向状态机)              |
+   |   (余弦>=0.58 + Top1落差<=0.10 + LRU缓存) |      | - chat_logs (最近6轮会话记忆)           |
+   | - 融合层: RRF (k=60) + 单路尾部裁剪 (0.6) |      | - chat_turns / chat_events / approvals |
+   +------------------------------------------+      +----------------------------------------+
 ```
 
 ---
 
 ## 🛠️ 技术栈选型
 
-| 层次 / 模块 | 技术选型 | 版本 / 说明 | 选型考量与原则 |
-| :--- | :--- | :--- | :--- |
-| **开发语言** | Python | 3.11+ | 现代化类型注解，原生高效性能与异步支持 |
-| **Web 框架** | FastAPI | $\ge 0.110.0$ | 极速异步接口响应，原生 Pydantic v2 参数校验与 Swagger 文档 |
-| **应用服务器**| Uvicorn | $\ge 0.28.0$ | 高性能 ASGI 生产服务器 |
-| **数据持久化**| SQLite 3 | 标准库 | 原生 SQL 参数化查询防注入，零独立进程运维成本，数据操作透明易读 |
-| **大模型 SDK**| OpenAI Python | $\ge 1.14.0$ | 标准化协议，无缝接入 DeepSeek、通义千问、MiniMax 等国内主流模型 |
-| **全文检索** | rank-bm25 + jieba | $\ge 0.2.2$ / $\ge 0.42.1$ | 纯本地快速分词与倒排索引，无向量模型依赖与显存开销，轻量可解释 |
-| **容器化方案**| Docker + Compose | 生产级 Multi-Stage / Compose | 镜像基于 `python:3.11-slim`，无缓存瘦身，数据持久卷挂载 |
-| **接口限流** | 自研滑动窗口限流 | 纯 Python 标准库 | 基于 `collections.defaultdict` + `threading.Lock`，无外部 Redis 依赖 |
+| 模块 | 技术选型 | 说明 |
+| :--- | :--- | :--- |
+| **后端服务** | Python 3.12 · FastAPI · Pydantic v2 · Uvicorn | 全异步接口、严格 Schema 校验与 Swagger 文档 |
+| **状态编排** | LangGraph (`StateGraph`) | 显式节点与护栏流转，不引入重型链式黑盒封装 |
+| **大模型适配** | 官方 `openai` SDK（端口-适配器模式） | 支持 DeepSeek / 通义 / 豆包等 OpenAI 兼容协议热切换 |
+| **混合检索** | `jieba` + `rank-bm25` + `chromadb` + 在线 Embedding | 零 `torch` / 本地大模型依赖，低内存容器友好，无 Key 自动降级 BM25 |
+| **数据存储** | Python 标准库 `sqlite3`（WAL 模式 + 参数化 SQL） | 零 ORM 黑盒，事务保证事件 `seq` 严格递增与工单一致性 |
+| **前端控制台** | React 19 · TypeScript · Vite 6 | 仅 7 个核心依赖，自定义 SSE 帧解析与 `seq` 幂等补发状态机 |
+| **容器部署** | Multi-Stage Docker (`node:20-alpine` + `python:3.12-slim`) | 单容器托管前后端，挂载 `./data` 持久化 SQLite 与 Chroma 索引 |
 
 ---
 
-## 📊 自动化业务评测与性能基准
+## ⚡ 本地运行、容器部署与评测复现
 
-项目集成自主研发的端到端并发评测套件（`eval/run_eval.py`），基于 **500 条模拟真实电商订单底库** 与 **100 条多场景复合测试集** 进行了 4 线程高并发严格压测。
+### 1. 环境准备
 
-### 1. 核心指标概览
-
-> 数据来源：最新端到端自动化并发评测报告（详见 `eval/eval_report.md`）
-
-| 评测维度 | 实测数据 | 工业级达标基线 | 判定结论 |
-| :--- | :---: | :---: | :---: |
-| **综合用例通过率 (Overall Pass Rate)** | **90.0%** (90/100) | $\ge 90.0\%$ | ✅ **PASS 达标** |
-| **工具调用路由准确率 (Tool Accuracy)** | **94.0%** (94/100) | $\ge 90.0\%$ | ✅ **优秀** |
-| **防幻觉与对客安全率 (Safety Rate)** | **97.0%** (97/100) | $\ge 95.0\%$ | ✅ **优秀** |
-| **平均端到端耗时 (Avg Latency)** | **1763 ms** | $\le 4000\text{ ms}$ | ✅ **表现优异** |
-| **P95 响应耗时 (P95 Latency)** | **2873 ms** | $\le 6500\text{ ms}$ | ✅ **稳定可控** |
-
-### 2. 五大业务场景模块通过率明细
-
-```text
-1. 意图路由与闲聊   [====================] 100.0% (20/20)  Avg: 1230ms
-2. 政策检索与知识库 [===================.]  95.0% (19/20)  Avg: 2168ms
-3. 时间状态边界推理 [==================..]  90.0% (18/20)  Avg: 2166ms
-4. 工单工作流与闭环 [================....]  80.0% (16/20)  Avg: 2042ms
-5. 安全边界与防越狱 [=================...]  85.0% (17/20)  Avg: 1209ms
-```
-
-| 场景分类模块 | 用例数 | 通过数 | 通过率 | 平均耗时 | 考察重点与判定要点 |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **1. 意图路由与闲聊** | 20 | 20 | **100.0%** | 1230 ms | 准确识别日常问候、辱骂情绪安抚，订单/工单查询直调工具，无废话 |
-| **2. 政策检索与知识库** | 20 | 19 | **95.0%** | 2168 ms | 退换货运费承担、换新期限、发票开具时效准确检索，引用条例合规 |
-| **3. 时间与状态边界推理** | 20 | 18 | **90.0%** | 2166 ms | 结合签收日期动态推算「7天退货 / 15天换货 / 质保期 / 刻字不退」边界 |
-| **4. 工单工作流与决策闭环** | 20 | 16 | **80.0%** | 2042 ms | 缺参主动追问，证据充分直接建单；非退换货范围礼貌拒单并讲明原因 |
-| **5. 安全边界与防幻觉** | 20 | 17 | **85.0%** | 1209 ms | 抵御最高管理员越狱、Prompt 泄漏刺探、非法私下改地址、SQL 注入攻击 |
-
----
-
-## ⚡ 快速开始与部署
-
-### 方式一：本地极速启动（开发者模式）
-
-#### 1. 克隆代码与配置虚拟环境
 ```bash
-git clone https://github.com/your-username/smart-cs-agent.git
+git clone https://github.com/chenhuaihao/smart-cs-agent.git
 cd smart-cs-agent
 
-# 创建并激活 Python 3.11+ 虚拟环境
+# 创建 Python 3.12 虚拟环境并安装依赖
 python -m venv .venv
 # Windows (PowerShell)
 .venv\Scripts\Activate.ps1
 # Linux / macOS
 source .venv/bin/activate
 
-# 安装项目依赖
 pip install -r requirements.txt
-```
 
-#### 2. 配置环境变量
-复制配置模板并填入您的真实模型 API Key：
-```bash
-# Windows (PowerShell)
-Copy-Item .env.example .env
-# Linux / macOS
+# 复制环境变量模板并填入真实 API Key（EMBEDDING_API_KEY 可选，留空自动降级纯 BM25）
 cp .env.example .env
 ```
-在 `.env` 中填入你的配置：
-```ini
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
-DEEPSEEK_MODEL=deepseek-chat
-SQLITE_DB_PATH=./data/smart_cs.db
-RATE_LIMIT_PER_MINUTE=15
-```
 
-#### 3. 启动服务与访问
+### 2. 前后端本地启动
+
+**方式 A：开发热更新联调（推荐）**
 ```bash
+# 终端 1：启动 FastAPI 后端（端口 8000）
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+
+# 终端 2：安装并启动 React + Vite 前端（端口 5173，/api 自动代理至 8000 且不缓冲 SSE）
+cd frontend
+npm install
+npm run dev
 ```
-服务就绪后即可访问：
-- 🖥️ **智能售后工作台**：[http://127.0.0.1:8000/](http://127.0.0.1:8000/)
-- 📖 **Swagger 交互式文档**：[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- 🩺 **健康检查探测接口**：[http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+打开浏览器访问 **http://127.0.0.1:5173/**（Swagger 文档：http://127.0.0.1:8000/docs）。
 
----
+**方式 B：单端口生产预览**
+```bash
+cd frontend && npm install && npm run build && cd ..
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+直接访问 **http://127.0.0.1:8000/** 即可使用编译后的 v2.0 控制台。
 
-### 方式二：Docker & Compose 一键容器化部署（生产模式）
-
-无需在宿主机安装 Python 环境，开箱即用：
+### 3. Docker 多阶段一键部署
 
 ```bash
-# 1. 确保已配置好 .env
-# 2. 一键构建并以后台守护模式启动服务
+# 确保项目根目录已配置 .env
 docker compose up -d --build
 
-# 查看运行状态与健康检查
+# 查看容器状态与健康检查
 docker compose ps
-
-# 实时查看服务运行日志
 docker compose logs -f smart-cs-agent
 ```
-> **持久化保障**：`docker-compose.yml` 已经默认将宿主机的 `./data` 目录挂载至容器内部 `/app/data`，即便容器重启或镜像升级，所有的历史工单、订单与会话记录均完好保留。
+容器默认通过 `./data:/app/data` 挂载持久化 SQLite（`smart_cs.db`）与 Chroma 向量库（`chroma_db/`）。
 
----
-
-### 方式三：运行 100 题自动化端到端并发评测
-
-针对上线前的功能完备性、工具准确率与防刷稳定性进行一键回归压测：
+### 4. 单元测试与评测复现
 
 ```bash
-# 本地压测前建议调高单 IP 限流阈值（如设为 1000），避免压测请求被限流拦截
-# Windows (PowerShell)
-$env:RATE_LIMIT_PER_MINUTE="1000"; python eval/run_eval.py --workers 4
+# 1. 运行全量后端单元测试（P0 流式与补发 + P1 护栏与 HITL + P2/P4 Hybrid RAG 与限流，零外网依赖）
+pytest tests/ -v
 
-# Linux / Bash
+# 2. 运行前端类型检查与生产构建
+cd frontend && npx tsc --noEmit && npm run build
+
+# 3. 复现 40 题 4 配置 RAG 量化评测（需 .env 已配置 EMBEDDING_API_KEY）
+python eval/run_rag_eval.py
+
+# 4. 复现 100 题端到端对话并发评测（需服务已启动）
 RATE_LIMIT_PER_MINUTE=1000 python eval/run_eval.py --workers 4
 ```
-评测完成后将在控制台输出统计图表，并在 `eval/eval_report.md` 生成包含全部用例执行明细与 Bad Case 归因的完整分析报告。
 
 ---
 
-## 📸 界面演示与体验
-
-> 💡 *项目内置开箱即用的前端交互工作台（SPA），支持直观体验订单状态穿透、政策 RAG 检索核验与工单状态实时流转。*
-
-| 售后工单决策流转演示 | 知识库检索与全链路白盒追踪 |
-| :---: | :---: |
-| *(工作台演示截图预留位置：`docs/images/demo_chat.png`)* | *(全链路调用与追踪截图预留位置：`docs/images/demo_trace.png`)* |
-
-🌐 **公网在线体验 Demo**：`https://smart-cs.your-domain.com` *(公网部署链接预留位)*
-
----
-
-## 📂 项目工程目录规范
+## 📂 目录结构
 
 ```text
 smart-cs-agent/
-├── app/                          # 核心业务应用代码
-│   ├── main.py                   # FastAPI 应用入口与生命周期管理
-│   ├── agent/                    # Agent 核心推理层
-│   │   ├── core.py               # Function Calling 循环与会话编排
-│   │   ├── prompts.py            # 对客话术、安全防御与系统指令提示词
-│   │   ├── tools.py              # 工具注册定义与执行分发器
-│   │   └── knowledge.py          # 基于 BM25 与分词的轻量本地 RAG 检索器
-│   ├── core/                     # 生产级核心组件
-│   │   └── limiter.py            # 纯标准库滑动窗口防刷限流器 (Rate Limiter)
-│   ├── db/                       # 数据底座层 (纯原生 SQL)
-│   │   ├── database.py           # SQLite 连接上下文池与建表 DDL
-│   │   └── seed.py               # 500+ 真实/模拟订单数据补录
-│   ├── routers/                  # API 路由分发层
-│   │   ├── chat.py               # POST /api/chat (挂载滑动窗口限流)
-│   │   ├── orders.py             # 订单详情与物流查询
-│   │   ├── tickets.py            # 工单创建、状态流转与列表查询
-│   │   └── knowledge.py          # 知识库检索独立调试接口
-│   ├── schemas/                  # Pydantic v2 入参与出参类型定义
-│   └── static/                   # 售后工作台前端静态单页应用
-├── data/                         # 持久化数据与业务资产
-│   ├── knowledge/                # 售后政策 Markdown 原文 (退换货/保修/价保/发票)
-│   └── smart_cs.db               # SQLite 数据库持久化文件 (挂载卷)
-├── eval/                         # 自动化评测套件
-│   ├── run_eval.py               # 多线程并发评测驱动脚本
-│   ├── cases/                    # 100 道分类业务评测用例集 (5 大模块)
-│   └── eval_report.md            # 自动生成的端到端压测详尽分析报告
-├── Dockerfile                    # 生产容器化构建定义 (python:3.11-slim)
-├── docker-compose.yml            # 容器编排与数据卷持久化配置
-├── .dockerignore                 # 容器构建上下文隔离过滤配置
-├── .gitignore                    # Git 版本控制忽略清单
-├── .env.example                  # 环境变量参考模版 (严禁提交敏感 Key)
-├── requirements.txt              # 生产核心依赖清单
-└── README.md                     # 项目技术架构与使用说明文档
+├── app/
+│   ├── main.py                   # FastAPI 入口、启动预热与 frontend/dist 自动托管
+│   ├── agent/
+│   │   ├── core.py               # 流式调度、整轮超时与 HITL 挂起/恢复
+│   │   ├── graph.py              # LangGraph 状态机（agent / tools / policy_verifier / fallback）
+│   │   ├── guardrails.py         # EvidenceLedger 证据账本与代码级规则校验器
+│   │   ├── knowledge.py          # Hybrid RAG（BM25 + 向量 + Pre-RRF 门控 + RRF 裁剪 + LRU 缓存）
+│   │   ├── vector_store.py       # Chroma 本地持久化封装与内容哈希增量同步
+│   │   ├── tools.py              # 4 个业务工具定义与安全分发器
+│   │   ├── memory.py             # 会话最近 6 轮上下文读写
+│   │   └── prompts.py            # 系统指令与业务守则
+│   ├── llm/
+│   │   ├── base.py               # BaseLLMProvider 抽象端口
+│   │   ├── deepseek.py           # OpenAI 兼容流式 Provider 适配器
+│   │   ├── factory.py            # LLM Provider 单例工厂
+│   │   └── embedding.py          # BaseEmbeddingProvider + OpenAI 兼容在线 Embedding 适配器
+│   ├── core/limiter.py           # 滑动窗口 IP 限流、每日熔断与重置冷却/口令保护
+│   ├── db/                       # SQLite DDL、事务事件存储（events.py）与 24 条标准种子数据（seed.py）
+│   ├── routers/                  # /api/chat、/api/orders、/api/tickets、/api/knowledge
+│   └── schemas/                  # Pydantic v2 契约模型
+├── frontend/                     # React 19 + TypeScript + Vite 6 控制台工程
+│   ├── vite.config.ts            # /api 代理与 SSE 透传配置
+│   └── src/
+│       ├── types/chat.ts         # 与后端对齐的完整 TypeScript 协议类型
+│       ├── api/client.ts         # REST + ReadableStream SSE 解析客户端
+│       ├── hooks/useChatStream.ts# 流式状态机、after_seq 自动补发与 seq 幂等去重
+│       └── components/           # ChatWorkspace / ApprovalCard / TicketBoard / InspectorDrawer / FormattedText
+├── data/knowledge/               # 6 篇售后规则与故障排查 Markdown 知识库
+├── eval/                         # 100 题端到端评测 + 40 题 4 配置 RAG 消融评测套件
+├── tests/                        # P0 / P1 / P2 / P4 自动化验收测试套件（19 条用例）
+├── Dockerfile                    # Node 20 + Python 3.12 多阶段轻量构建
+├── docker-compose.yml            # 单容器编排与数据卷持久化
+└── .env.example                  # 全量环境变量模板
 ```
 
 ---
 
-## 📄 开源许可证
+## 🌐 公网演示环境与开源协议
 
-本项目基于 [MIT License](LICENSE) 开源。欢迎交流、学习与技术探讨！
-
-## 公网演示环境（阿里云 ECS 华南3·广州）
-- **在线访问地址**：http://8.166.124.35:8000
-- **部署形态**：Docker Compose + FastAPI + SQLite + 内存 IP 限流（15 req/min）
-- **界面截图**：*(请将线上工作台截图保存至 docs/demo.png 后取消下方注释)*
-  <!-- ![Smart CS Agent 线上工作台](docs/demo.png) -->
-
+- **公网演示地址**：http://8.166.124.35:8000（阿里云 ECS 华南 3·广州，Docker Compose 单容器部署，启用 IP 限流与每日配额保护）
+- **开源协议**：本项目基于 [MIT License](LICENSE) 开源。

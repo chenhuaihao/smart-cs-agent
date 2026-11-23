@@ -1,350 +1,406 @@
 """
 app/agent/core.py
 
-Agent 核心调度模块：实现多轮对话 + Function Calling 循环。
-
-职责：
-  - 从 chat_logs 加载最近 6 轮历史作为上下文
-  - 调用 DeepSeek（OpenAI 兼容接口）进行推理
-  - 根据 tool_calls 分发工具执行，回填 tool 角色消息，循环直到自然语言回复
-  - 解析 search_knowledge_base 工具结果，提取保序去重的 citations 溯源引用
-  - 统计耗时，将本轮对话持久化到 chat_logs 表
+Agent 核心调度（v2.0 P1）：
+  - 消费 LangGraph 事件流 → 统一事件协议 → 先落库后推送；
+  - 集成整轮超时护栏（TURN_TIMEOUT_SEC），超时后安全取消任务并走降级收尾，不抛裸 500；
+  - 集成高风险写工具 HITL 挂起与恢复（approval_required → POST /turns/{turn_id}/approve）；
+  - 保持 POST /api/chat 与 run_agent(session_id, user_message) 默认 auto_approve=True 向后兼容。
 """
 
+import asyncio
 import json
 import logging
-import os
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, AsyncIterator
 
-from dotenv import load_dotenv
-from openai import OpenAI
-
-from app.agent.tools import TOOLS_SCHEMA, execute_tool
-from app.db.database import get_db_connection
-
-# 在模块加载时加载 .env，确保环境变量就绪
-load_dotenv()
+from app.agent.graph import (
+    LLM_ERROR_REPLY,
+    MAX_STEPS_FALLBACK_REPLY,
+    RECURSION_LIMIT,
+    agent_graph,
+    merge_citations,
+)
+from app.agent.guardrails import (
+    EvidenceLedger,
+    build_fallback_reply,
+    get_max_steps,
+    get_step_timeout_sec,
+    get_turn_timeout_sec,
+)
+from app.agent.memory import load_history, save_message
+from app.agent.prompts import build_system_prompt
+from app.agent.tools import execute_tool
+from app.db import events as event_store
+from app.llm.base import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# 客户端初始化（模块级单例，避免每次请求重复创建）
-# 优先读取 DEEPSEEK_* 环境变量，兼容 OPENAI_* 配置
-# ---------------------------------------------------------------------------
-
-_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-_BASE_URL = os.getenv("DEEPSEEK_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
-_MODEL_NAME = os.getenv("DEEPSEEK_MODEL") or os.getenv("OPENAI_MODEL_NAME", "deepseek-chat")
-
-if not _API_KEY:
-    # 缺少 API Key 时立刻报错，避免在实际请求时才触发隐晦的 401
-    raise EnvironmentError(
-        "缺少大模型 API Key 环境变量（DEEPSEEK_API_KEY 或 OPENAI_API_KEY）！"
-        "请在项目根目录的 .env 文件中配置真实的 API Key，参考 .env.example。"
-    )
-
-# 初始化 OpenAI 兼容客户端，timeout=30s 防止长时间挂起
-_client = OpenAI(
-    api_key=_API_KEY,
-    base_url=_BASE_URL,
-    timeout=30.0,
-)
-
-# ---------------------------------------------------------------------------
-# System Prompt：严格中文客服角色约束（含 RAG 强制检索规则）
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """你是"小智"，一名专业、友善的企业智能售后客服助理。
-
-【行为准则】
-1. **订单核验与政策咨询边界**：
-   - 只要用户在咨询中提及了具体订单号（无论其是否自述了签收日期、商品状态或时间差），**必须先调用 query_order 工具核实数据库真实订单与物流信息**，严禁仅凭用户单方自述直接给出售后结论。
-   - **政策咨询优先检索**：当用户咨询政策/规则（如7天价保、退换货条件、发票开具、保修质保、运费承担等）但**未提供订单号**时，**必须先调用 search_knowledge_base 检索并准确解答通用规则**！解答完毕后，可根据需要礼貌提示“如需核查具体订单的处理情况，请提供您的订单号”。**绝不能因为用户未提供订单号就直接拒答或跳过 search_knowledge_base 工具检索！**（仅在用户明确要求查询特定订单物流、特定工单或发起建单却未给单号时，才直接追问订单号）。
-2. **严禁捏造**：绝对不允许虚构不存在的订单信息、物流轨迹或工单记录。所有信息必须来源于工具查询结果。
-3. **异常物流检索与处置**：当查询订单后发现存在**超时未发货、物流停滞无更新、或用户怀疑丢件破损**等异常情况时，**必须主动调用 search_knowledge_base 检索物流异常处理与赔付规则**，严格依据店铺规则给出处置建议或协助建单，严禁仅凭常识口头安抚。
-4. **建单门槛与状态**：只有在用户**明确提出退货/换货/物流催单/售后咨询/转人工诉求**，并且**订单号和具体原因均已齐全**时，才可调用 create_after_sales_ticket 工具创建工单。新创建工单默认初始状态严格为【待处理】（需待售后专员审核跟进），严禁在回复中谎称工单已办结或已完成。条件不满足时，继续向用户收集信息。
-5. **结果解读**：收到工具返回的 JSON 后，将关键信息翻译为自然、易懂的中文回复给用户，不要直接暴露 JSON 原文。
-6. **工具错误处理**：若工具返回包含 "error" 字段，向用户说明情况并引导其提供正确信息，不要重复调用相同参数。
-7. **语气风格**：专业、简洁、有温度，使用礼貌敬语，避免过度啰嗦。
-8. **知识库优先与严禁虚假检索声明**：
-   - 凡是用户询问任何店铺规则、政策、服务权益、活动、分期/支付、换购、退换货条件、拆封退货、运费承担、质保期限（含各类配件质保）、保修流程、发货时效、退款到账时间、发票开具与7天价保、优惠券退款分摊、定制商品退换，以及遇到耳机（单耳无声/充电异常）或键盘等硬件故障排查时，**无论用户是否提供了订单号，都必须先实际调用 search_knowledge_base 工具检索，严禁凭借自身记忆直接作答，更严禁因未提供订单号而放弃知识库检索**。
-   - 遇到设备硬件故障（如耳机不响、键盘按键失灵）时，**先耐心引导用户按知识库指引进行自助排查与重置操作**；仅在用户反馈排查重置依然无效、且订单号与原因齐全时，再按政策时效协助发起换新或维修工单。
-   - 检索后，严格依据工具返回的条款原文作答。对客回复时，严禁暴露内部英文文件名或 `.md` 后缀（例如严禁输出 `return_policy.md`、`coupon_and_custom_rules.md` 等技术路径），应转化为自然友好的中文规则名称向用户说明（如"根据本店的定制商品售后规则"、"按照店铺7天无理由退货规定"）；精确的文件与章节溯源由系统后端自动记录，无需在聊天正文中展示。
-   - **绝对红线**：严禁在**未实际调用 search_knowledge_base** 的情况下，在回复中擅自声称"我检索了知识库"、"知识库中暂未找到"或"经查询知识库无此政策"等虚假表述！只有在确实发起了工具调用且返回结果为空或无匹配时，才可如实告知"本店知识库暂未收录相关说明"，并引导用户转接人工客服处理。
-
-【能力边界】
-- 你只处理售后相关问题（查订单、查工单、退换货、物流催单、转人工、政策咨询）。
-- 对于无关话题，礼貌说明你的职责范围并引导用户回到售后问题。
-"""
-
-# Function Calling 最大循环步数，防止模型异常导致死循环
-_MAX_STEPS = 6  # 知识库检索可能多消耗一步，从 5 调整到 6
-
-# 历史消息条数限制（最近 12 条 = 6 轮对话）
-_HISTORY_LIMIT = 12
+_FORWARD_EVENTS = {"stage", "tool_call", "citation", "token"}
+_background_tasks: set["asyncio.Task[None]"] = set()
 
 
-# ---------------------------------------------------------------------------
-# 历史记录读取
-# ---------------------------------------------------------------------------
+class _ApprovalWaitContext:
+    """进程内活跃 turn 的 HITL 挂起同步上下文（与 SQLite chat_approvals 持久化双写配合）。"""
 
-def _load_history(session_id: str) -> list[dict]:
-    """
-    从 chat_logs 表读取指定 session 最近 _HISTORY_LIMIT 条对话记录，
-    按 id DESC 取最新的，然后反转为时间正序，作为多轮上下文拼入 messages。
-
-    只取 role 和 content 字段，tool_called / latency_ms 是内部统计，
-    不需要传给大模型。
-    """
-    sql = """
-    SELECT role, content
-    FROM chat_logs
-    WHERE session_id = ?
-    ORDER BY id DESC
-    LIMIT ?;
-    """
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, (session_id, _HISTORY_LIMIT))
-            rows = cursor.fetchall()
-    except Exception as e:
-        # 读取历史失败不影响主流程，降级为空历史继续处理
-        logger.error("_load_history 数据库异常 session_id=%s: %s", session_id, e)
-        return []
-
-    # 查出是倒序的（最新在前），反转后得到时间正序的历史消息
-    messages = [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
-    return messages
+    def __init__(self, queue: "asyncio.Queue[dict[str, Any] | None]") -> None:
+        self.queue = queue
+        self.event = asyncio.Event()
+        self.approved: bool = False
+        self.done_event = asyncio.Event()
 
 
-# ---------------------------------------------------------------------------
-# 对话记录持久化
-# ---------------------------------------------------------------------------
+_approval_waiters: dict[str, _ApprovalWaitContext] = {}
 
-def _save_message(
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+async def _emit(turn_id: str, event_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    """先落库拿 seq，再返回完整事件；SQLite 写入放线程池，避免阻塞事件循环。"""
+    return await asyncio.to_thread(event_store.append_event, turn_id, event_type, data)
+
+
+def _build_approval_summary(tool_name: str, args: dict[str, Any]) -> str:
+    """生成可读的待确认摘要。"""
+    if tool_name == "create_after_sales_ticket":
+        oid = args.get("order_id", "未知订单")
+        itype = args.get("issue_type", "售后")
+        summary = args.get("summary") or args.get("reason") or ""
+        return f"即将为订单 {oid} 创建【{itype}】售后工单：{summary}"
+    return f"请求执行高风险工具 {tool_name}"
+
+
+async def _consume_graph_events(
+    turn_id: str,
+    initial_state: dict[str, Any],
+    config: dict[str, Any],
+    started_at: float,
+    wait_ctx: _ApprovalWaitContext,
+) -> tuple[dict[str, Any], list[str], list[str], int | None]:
+    """消费图事件并实时落库入队（通过 wait_ctx.queue 动态路由到当前活跃的 SSE 队列）。"""
+    ttft_ms: int | None = None
+    tools_called: list[str] = []
+    citations: list[str] = []
+    final_state: dict[str, Any] = {}
+
+    async for ev in agent_graph.astream_events(initial_state, config=config, version="v2"):
+        if ev["event"] == "on_custom_event" and ev["name"] in _FORWARD_EVENTS:
+            name, data = ev["name"], ev["data"]
+            if name == "token" and ttft_ms is None:
+                ttft_ms = _elapsed_ms(started_at)
+            elif name == "tool_call" and data.get("status") != "cancelled":
+                tools_called.append(data["name"])
+            elif name == "citation":
+                citations = merge_citations(citations, data["citations"])
+            await wait_ctx.queue.put(await _emit(turn_id, name, data))
+        elif ev["event"] == "on_chain_end" and not ev.get("parent_ids"):
+            final_state = ev["data"].get("output") or {}
+
+    return final_state, tools_called, citations, ttft_ms
+
+
+async def _run_turn(
+    turn_id: str,
     session_id: str,
-    role: str,
-    content: str,
-    tool_called: str | None = None,
-    latency_ms: int | None = None,
+    user_message: str,
+    started_at: float,
+    queue: "asyncio.Queue[dict[str, Any] | None]",
+    provider: BaseLLMProvider | None,
+    auto_approve: bool,
 ) -> None:
     """
-    将单条消息写入 chat_logs 表。
-    tool_called 仅在 assistant 消息时有值（逗号拼接的工具名列表）。
-    latency_ms 仅在 assistant 消息时有值（端到端耗时，毫秒）。
+    生产者：执行整轮推理并把"已落库"的事件放进队列。
+    支持 HITL 暂停：当 auto_approve=False 且触发高风险写工具时，写入 approval_required 并挂起，
+    同时向当前 SSE 流发送哨兵结束首段响应（或由 /approve 接口唤醒继续产出后续事件）。
     """
-    sql = """
-    INSERT INTO chat_logs (session_id, role, content, tool_called, latency_ms, created_at)
-    VALUES (?, ?, ?, ?, ?, ?);
-    """
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ttft_ms: int | None = None
+    tools_called: list[str] = []
+    citations: list[str] = []
+    final_state: dict[str, Any] = {}
+    status, final_type, error = event_store.TURN_COMPLETED, "done", None
+    cancelled = False
+    turn_timeout = get_turn_timeout_sec()
+    wait_ctx = _ApprovalWaitContext(queue)
+    _approval_waiters[turn_id] = wait_ctx
+
+    async def _approval_handler(call: dict[str, Any]) -> bool:
+        raw_args = call.get("arguments", "{}")
+        args = raw_args if isinstance(raw_args, dict) else json.loads(raw_args or "{}")
+        summary = _build_approval_summary(call["name"], args)
+        record = await asyncio.to_thread(
+            event_store.save_pending_approval,
+            turn_id,
+            call["name"],
+            call["id"],
+            args,
+            summary,
+        )
+        await wait_ctx.queue.put(record)
+        # 发出 approval_required 后向当前 SSE 流推送结束哨兵，使客户端立即收到事件并展示确认按钮；
+        # 后台图任务保持在 wait_ctx.event.wait() 上挂起，等 /approve 唤醒后继续走完剩余节点
+        await wait_ctx.queue.put(None)
+        await wait_ctx.event.wait()
+        return wait_ctx.approved
+
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, (session_id, role, content, tool_called, latency_ms, created_at))
-            conn.commit()
-    except Exception as e:
-        # 持久化失败记录日志，不阻断接口响应（已生成的回复照常返回）
-        logger.error(
-            "_save_message 写入失败 session_id=%s role=%s: %s",
-            session_id, role, e,
+        await queue.put(await _emit(turn_id, "stage", {"stage": "received", "session_id": session_id}))
+
+        history = await asyncio.to_thread(load_history, session_id)
+        messages = [
+            {"role": "system", "content": build_system_prompt()},
+            *history,
+            {"role": "user", "content": user_message},
+        ]
+        config: dict[str, Any] = {
+            "recursion_limit": RECURSION_LIMIT,
+            "configurable": {
+                "auto_approve": auto_approve,
+                "approval_handler": _approval_handler,
+                "max_steps": get_max_steps(),
+                "step_timeout_sec": get_step_timeout_sec(),
+            },
+        }
+        if provider is not None:
+            config["configurable"]["provider"] = provider
+
+        initial_state = {
+            "messages": messages,
+            "steps": 0,
+            "retry_count": 0,
+            "evidence_ledger": EvidenceLedger(),
+        }
+
+        final_state, tools_called, citations, ttft_ms = await asyncio.wait_for(
+            _consume_graph_events(turn_id, initial_state, config, started_at, wait_ctx),
+            timeout=turn_timeout,
         )
 
+        reply = final_state.get("final_reply")
+        if reply is None:
+            reply = MAX_STEPS_FALLBACK_REPLY
+        tools_called = final_state.get("tools_called", tools_called)
+        citations = final_state.get("citations", citations)
+    except asyncio.TimeoutError:
+        logger.warning("turn 整轮超时 turn_id=%s timeout=%ss", turn_id, turn_timeout)
+        reason = f"整轮对话处理超时（>{turn_timeout}s）"
+        reply = build_fallback_reply(reason)
+        await wait_ctx.queue.put(await _emit(turn_id, "stage", {"stage": "fallback", "reason": reason}))
+        await wait_ctx.queue.put(await _emit(turn_id, "token", {"delta": reply, "step": 0, "fallback": True}))
+        if ttft_ms is None:
+            ttft_ms = _elapsed_ms(started_at)
+    except asyncio.CancelledError:
+        cancelled = True
+        reply, status, final_type, error = (
+            build_fallback_reply("请求任务被取消"),
+            event_store.TURN_FAILED,
+            "error",
+            "cancelled",
+        )
+    except Exception as e:
+        logger.exception("turn 执行异常，进入降级收尾 turn_id=%s session_id=%s", turn_id, session_id)
+        reason = "后端模型或依赖服务暂时不可用"
+        reply = build_fallback_reply(reason)
+        status, final_type = event_store.TURN_COMPLETED, "done"
+        error = f"{type(e).__name__}: {e}"
+        try:
+            await wait_ctx.queue.put(await _emit(turn_id, "stage", {"stage": "fallback", "reason": reason}))
+            await wait_ctx.queue.put(await _emit(turn_id, "token", {"delta": reply, "step": 0, "fallback": True}))
+        except Exception:
+            logger.exception("写入异常降级事件失败 turn_id=%s", turn_id)
 
-# ---------------------------------------------------------------------------
-# citations 提取辅助函数
-# ---------------------------------------------------------------------------
+    latency_ms = _elapsed_ms(started_at)
+    try:
+        await asyncio.to_thread(save_message, session_id, "user", user_message)
+        await asyncio.to_thread(
+            save_message,
+            session_id,
+            "assistant",
+            reply,
+            ",".join(tools_called) if tools_called else None,
+            latency_ms,
+        )
+        payload: dict[str, Any] = {
+            "reply": reply,
+            "tools_called": tools_called,
+            "citations": citations,
+            "ttft_ms": ttft_ms,
+            "latency_ms": latency_ms,
+        }
+        if final_type == "error":
+            payload["message"] = "Agent 处理请求时发生内部错误，请稍后重试。"
+        record = await asyncio.to_thread(
+            event_store.finish_turn,
+            turn_id,
+            status,
+            final_type,
+            payload,
+            reply,
+            tools_called,
+            citations,
+            ttft_ms,
+            latency_ms,
+            error,
+        )
+        await wait_ctx.queue.put(record)
+    except Exception:
+        logger.exception("终态事件落库失败 turn_id=%s", turn_id)
+    finally:
+        wait_ctx.done_event.set()
+        await wait_ctx.queue.put(None)
+        _approval_waiters.pop(turn_id, None)
+        logger.info(
+            "turn 结束 turn_id=%s status=%s tools=%s citations=%s ttft_ms=%s latency_ms=%d",
+            turn_id, status, tools_called, citations, ttft_ms, latency_ms,
+        )
+    if cancelled:
+        raise asyncio.CancelledError()
 
-def _extract_citations(tool_name: str, tool_result: str) -> list[str]:
+
+async def approve_turn_stream(turn_id: str, approved: bool) -> AsyncIterator[dict[str, Any]]:
     """
-    从 search_knowledge_base 工具的返回 JSON 中提取溯源引用列表。
-    格式：["文件名#章节名", ...]，保序去重（先出现的优先）。
-
-    之所以在此直接解析结构化 JSON 而非依赖大模型在回复文本中输出：
-    - 结构化解析可靠性 100%，不受大模型措辞影响
-    - 不需要在 Prompt 中要求大模型格式化输出，减少 Prompt 复杂度
+    处理高风险写操作 HITL 审批决策（POST /api/chat/turns/{turn_id}/approve）：
+      - 优先唤醒内存中挂起的图任务，将后续 tool_call / token / done 事件以流式产出；
+      - 若挂起任务不在当前进程内存（例如跨重启恢复），则直接基于 SQLite chat_approvals 记录执行/取消并收尾。
     """
-    # 仅对知识库检索工具提取 citations，其他工具忽略
-    if tool_name != "search_knowledge_base":
-        return []
+    started_at = time.monotonic()
+    pending = await asyncio.to_thread(event_store.resolve_pending_approval, turn_id, approved)
+    if pending is None:
+        raise ValueError(f"turn_id={turn_id} 当前不在 waiting_approval 状态或不存在待审批记录")
+
+    wait_ctx = _approval_waiters.get(turn_id)
+    if wait_ctx is not None:
+        resume_queue: "asyncio.Queue[dict[str, Any] | None]" = asyncio.Queue()
+        wait_ctx.queue = resume_queue
+        wait_ctx.approved = approved
+        wait_ctx.event.set()
+        while (item := await resume_queue.get()) is not None:
+            yield item
+        return
+
+    # 兜底：若内存中无挂起协程，直接基于 SQLite 记录执行工具并收尾
+    turn = await asyncio.to_thread(event_store.get_turn, turn_id)
+    session_id = (turn or {}).get("session_id", "")
+    user_message = (turn or {}).get("user_message", "")
+    tool_name = pending["tool_name"]
+    call_id = pending["call_id"]
+    args = pending["args"]
+
+    tools_called: list[str] = []
+    if approved:
+        t0 = time.monotonic()
+        res_str = await asyncio.to_thread(execute_tool, tool_name, args)
+        dur = int((time.monotonic() - t0) * 1000)
+        res_obj = json.loads(res_str)
+        tools_called.append(tool_name)
+        yield await _emit(
+            turn_id,
+            "tool_call",
+            {"call_id": call_id, "name": tool_name, "arguments": args, "status": "success", "duration_ms": dur},
+        )
+        tid = res_obj.get("ticket_id", "")
+        reply = f"已为您成功创建售后工单（工单号：{tid}，状态：待处理），售后专员将尽快为您跟进。"
+    else:
+        yield await _emit(
+            turn_id,
+            "tool_call",
+            {"call_id": call_id, "name": tool_name, "arguments": args, "status": "cancelled", "duration_ms": 0},
+        )
+        reply = "已按照您的指示取消创建售后工单。如需其他帮助，请随时告诉我。"
+
+    yield await _emit(turn_id, "token", {"delta": reply, "step": 1})
+    latency_ms = _elapsed_ms(started_at)
+    await asyncio.to_thread(save_message, session_id, "user", user_message)
+    await asyncio.to_thread(
+        save_message, session_id, "assistant", reply, ",".join(tools_called) if tools_called else None, latency_ms
+    )
+    done_payload = {
+        "reply": reply,
+        "tools_called": tools_called,
+        "citations": [],
+        "ttft_ms": latency_ms,
+        "latency_ms": latency_ms,
+    }
+    yield await asyncio.to_thread(
+        event_store.finish_turn,
+        turn_id,
+        event_store.TURN_COMPLETED,
+        "done",
+        done_payload,
+        reply,
+        tools_called,
+        [],
+        latency_ms,
+        latency_ms,
+        None,
+    )
+
+
+async def stream_agent(
+    session_id: str,
+    user_message: str,
+    turn_id: str | None = None,
+    started_at: float | None = None,
+    provider: BaseLLMProvider | None = None,
+    auto_approve: bool = False,
+) -> AsyncIterator[dict[str, Any]]:
+    """
+    流式执行一轮对话，逐条产出已落库的事件。
+    流式模式默认 auto_approve=False（对高风险写操作启用 HITL 显式授权）。
+    """
+    started_at = started_at if started_at is not None else time.monotonic()
+    if turn_id is None:
+        turn_id = await asyncio.to_thread(event_store.create_turn, session_id, user_message)
+
+    queue: "asyncio.Queue[dict[str, Any] | None]" = asyncio.Queue()
+    task = asyncio.create_task(
+        _run_turn(turn_id, session_id, user_message, started_at, queue, provider, auto_approve)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     try:
-        data = json.loads(tool_result)
-    except json.JSONDecodeError:
-        # 工具返回格式异常（如包含 error 字段的非列表 JSON），直接跳过
-        return []
-
-    if not isinstance(data, list):
-        # 返回 {"error": ...} 或其他非列表结构时，无可提取的 citations
-        return []
-
-    # 保序去重：用 seen set 判断重复，用 list 保序
-    seen: set[str] = set()
-    citations: list[str] = []
-    for chunk in data:
-        source = chunk.get("source", "")
-        section = chunk.get("section", "")
-        if source and section:
-            key = f"{source}#{section}"
-            if key not in seen:
-                seen.add(key)
-                citations.append(key)
-
-    return citations
+        while (item := await queue.get()) is not None:
+            yield item
+    finally:
+        if not task.done():
+            logger.info("流阶段结束或客户端断开 turn_id=%s，任务在后台保持或等待 HITL 确认", turn_id)
 
 
-# ---------------------------------------------------------------------------
-# 核心 Agent 入口
-# ---------------------------------------------------------------------------
+async def arun_agent(
+    session_id: str,
+    user_message: str,
+    provider: BaseLLMProvider | None = None,
+    auto_approve: bool = True,
+) -> tuple[str, list[str], int, list[str]]:
+    """
+    异步收集版：默认开启 auto_approve=True，保持 POST /api/chat 与 eval/run_eval.py 100% 兼容不中断。
+    """
+    started_at = time.monotonic()
+    final: dict[str, Any] | None = None
+    async for event in stream_agent(
+        session_id,
+        user_message,
+        started_at=started_at,
+        provider=provider,
+        auto_approve=auto_approve,
+    ):
+        if event["type"] in ("done", "error"):
+            final = event["data"]
+
+    if final is None:
+        return LLM_ERROR_REPLY, [], _elapsed_ms(started_at), []
+    return final["reply"], final["tools_called"], final["latency_ms"], final["citations"]
+
 
 def run_agent(session_id: str, user_message: str) -> tuple[str, list[str], int, list[str]]:
-    """
-    执行一轮完整的 Agent 推理（含多步 Function Calling 循环）。
+    """v1.0 同步兼容入口：默认 auto_approve=True，签名与返回值保持 4 元组不变。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(arun_agent(session_id, user_message, auto_approve=True))
 
-    流程：
-      1. 读取历史消息组装 messages
-      2. 进入循环（最多 _MAX_STEPS 步）：
-         a. 调用大模型
-         b. 若返回 tool_calls → 执行工具 → 回填 tool 角色消息 → 继续下一轮
-            如果工具是 search_knowledge_base，同步解析返回结果提取 citations
-         c. 若 finish_reason == "stop" → 输出最终回复，退出循环
-      3. 计算端到端耗时
-      4. 将用户输入和最终回复持久化到 chat_logs
-      5. 返回 (reply, tools_called, latency_ms, citations)
-
-    参数：
-      session_id   - 会话唯一标识，用于读取/写入历史记录
-      user_message - 用户本轮输入内容
-
-    返回：
-      reply        - 助手最终自然语言回复
-      tools_called - 本轮实际调用的工具名列表（可能为空）
-      latency_ms   - 端到端耗时（毫秒）
-      citations    - 本轮命中知识库条款的去重来源列表（格式: "文件名#章节名"）
-    """
-    start_time = time.monotonic()
-
-    # 1. 加载历史 + 构建 messages（动态注入当前系统日期 + system + history + 本轮用户输入）
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    dynamic_system_prompt = (
-        f"{_SYSTEM_PROMPT}\n"
-        f"【系统运行环境】\n"
-        f"- 当前系统日期：{today_str}（用于精准核算订单签收或购买距今经过的天数，准确判断是否在 7天无理由退货、15天质量换新或官方质保期限内）。"
-    )
-
-    history = _load_history(session_id)
-    messages: list[dict] = [{"role": "system", "content": dynamic_system_prompt}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_message})
-
-    tools_called: list[str] = []  # 记录本轮调用的工具名
-    citations: list[str] = []     # 记录知识库命中条款来源（保序去重）
-    final_reply: str | None = None
-
-    logger.info(
-        "run_agent 开始 session_id=%s history_len=%d user_message='%s'",
-        session_id, len(history), user_message[:50],
-    )
-
-    # 2. Function Calling 循环
-    for step in range(_MAX_STEPS):
-        logger.info("run_agent step=%d messages_count=%d", step, len(messages))
-
-        try:
-            response = _client.chat.completions.create(
-                model=_MODEL_NAME,
-                messages=messages,          # type: ignore[arg-type]
-                tools=TOOLS_SCHEMA,         # type: ignore[arg-type]
-                tool_choice="auto",         # 由模型自主决定是否调用工具
-            )
-        except Exception as e:
-            # 大模型 API 调用失败（网络超时、鉴权失败等），立即返回友好提示
-            logger.error("run_agent: 大模型 API 调用失败 step=%d: %s", step, e)
-            final_reply = "抱歉，我暂时无法连接到后端服务，请稍后重试。如有紧急问题，可联系人工客服。"
-            break
-
-        assistant_message = response.choices[0].message
-        finish_reason = response.choices[0].finish_reason
-
-        logger.info("run_agent step=%d finish_reason=%s", step, finish_reason)
-
-        # 2a. 大模型请求调用工具（通过 message.tool_calls 判断，兼容 DeepSeek 格式）
-        if assistant_message.tool_calls:
-            # 将 assistant 的完整消息（含 tool_calls）回填到 messages
-            messages.append(assistant_message)  # type: ignore[arg-type]
-
-            # 逐个执行工具调用，每个调用结果以 tool 角色追加到 messages
-            for tool_call in assistant_message.tool_calls:
-                tool_name = tool_call.function.name
-                arguments = tool_call.function.arguments  # JSON 字符串
-
-                logger.info(
-                    "run_agent: 调用工具 tool_name=%s call_id=%s",
-                    tool_name, tool_call.id,
-                )
-
-                # 执行工具，execute_tool 内部保证不抛异常
-                tool_result = execute_tool(tool_name, arguments)
-                tools_called.append(tool_name)
-
-                # 若工具为知识库检索，直接解析结构化结果提取 citations（不依赖大模型输出）
-                # 保序去重：已在 _extract_citations 内部处理，这里做跨调用去重
-                new_citations = _extract_citations(tool_name, tool_result)
-                for c in new_citations:
-                    if c not in citations:
-                        citations.append(c)
-
-                # 将工具返回结果以 tool 角色追加（DeepSeek 兼容 OpenAI tool 消息格式）
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result,
-                })
-
-                logger.info("run_agent: 工具结果 tool_name=%s result='%s'", tool_name, tool_result[:100])
-
-            # 工具执行完毕，继续循环让模型处理工具结果
-            continue
-
-        # 2b. 模型返回自然语言回复（finish_reason == "stop"）
-        if finish_reason == "stop":
-            final_reply = assistant_message.content or ""
-            break
-
-        # 2c. 其他意外 finish_reason（如 "length" 截断），取当前 content 兜底
-        logger.warning("run_agent: 意外 finish_reason=%s，取当前 content 兜底", finish_reason)
-        final_reply = assistant_message.content or ""
-        break
-
-    # 3. 达到最大步数仍未生成最终回复：友好兜底，避免返回 None
-    if final_reply is None:
-        logger.warning(
-            "run_agent: 达到最大步数 %d 仍未生成最终回复 session_id=%s",
-            _MAX_STEPS, session_id,
-        )
-        final_reply = (
-            "非常抱歉，我在处理您的请求时遇到了一点复杂情况，未能及时给出回复。"
-            "建议您稍后重试，或联系人工客服为您进一步处理。"
-        )
-
-    # 4. 计算端到端耗时（毫秒）
-    latency_ms = int((time.monotonic() - start_time) * 1000)
-
-    # 5. 持久化：先写用户输入，再写助手回复（含工具调用列表和耗时）
-    _save_message(session_id, "user", user_message)
-    _save_message(
-        session_id,
-        "assistant",
-        final_reply,
-        tool_called=",".join(tools_called) if tools_called else None,
-        latency_ms=latency_ms,
-    )
-
-    logger.info(
-        "run_agent 完成 session_id=%s tools_called=%s citations=%s latency_ms=%d",
-        session_id, tools_called, citations, latency_ms,
-    )
-
-    return final_reply, tools_called, latency_ms, citations
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, arun_agent(session_id, user_message, auto_approve=True)).result()

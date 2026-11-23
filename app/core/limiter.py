@@ -38,19 +38,25 @@ class SlidingWindowLimiter:
     使用 threading.Lock 保证并发读写安全性。
     """
 
-    def __init__(self, window_seconds: int = 60, default_limit: int = 15) -> None:
+    def __init__(
+        self,
+        window_seconds: int = 60,
+        default_limit: int = 15,
+        env_var: str = "RATE_LIMIT_PER_MINUTE",
+    ) -> None:
         self.window_seconds = window_seconds
         self.default_limit = default_limit
+        self.env_var = env_var
         # 记录各 IP 的历史请求时间戳列表: {ip: [ts1, ts2, ...]}
         self._history: Dict[str, List[float]] = defaultdict(list)
         self._lock = threading.Lock()
 
     def _get_limit(self) -> int:
         """
-        动态读取环境变量 RATE_LIMIT_PER_MINUTE，支持热调整或环境覆盖。
-        若未配置或解析失败，回退至 default_limit (15)。
+        动态读取对应环境变量（如 RATE_LIMIT_PER_MINUTE / API_READ_RATE_LIMIT_PER_MINUTE），
+        若未配置或解析失败，回退至 default_limit。
         """
-        env_val = os.getenv("RATE_LIMIT_PER_MINUTE")
+        env_val = os.getenv(self.env_var)
         if env_val:
             try:
                 parsed = int(env_val.strip())
@@ -110,8 +116,18 @@ class SlidingWindowLimiter:
             del self._history[ip]
 
 
-# 模块级单 IP 限流单例
-_chat_limiter = SlidingWindowLimiter()
+# 模块级单 IP 限流单例（对话 / 业务只读 / 业务写操作分桶隔离）
+_chat_limiter = SlidingWindowLimiter(window_seconds=60, default_limit=15, env_var="RATE_LIMIT_PER_MINUTE")
+_api_read_limiter = SlidingWindowLimiter(
+    window_seconds=60,
+    default_limit=60,
+    env_var="API_READ_RATE_LIMIT_PER_MINUTE",
+)
+_api_write_limiter = SlidingWindowLimiter(
+    window_seconds=60,
+    default_limit=20,
+    env_var="API_WRITE_RATE_LIMIT_PER_MINUTE",
+)
 
 
 # ==============================================================================
@@ -232,3 +248,65 @@ def check_daily_quota_limit() -> None:
     按北京时间每日 00:00 自动重置，超出上限直接返回 HTTP 429。
     """
     _daily_quota_limiter.check_and_increment()
+
+
+def check_api_read_rate_limit(request: Request) -> None:
+    """挂载在 /api/knowledge/search、/api/orders、GET /api/tickets 的轻量只读 IP 限流依赖项。"""
+    client_ip = get_client_ip(request)
+    _api_read_limiter.check(client_ip)
+
+
+def check_api_write_rate_limit(request: Request) -> None:
+    """挂载在 POST/PATCH /api/tickets* 的写操作 IP 限流依赖项。"""
+    client_ip = get_client_ip(request)
+    _api_write_limiter.check(client_ip)
+
+
+# 演示重置独立冷却限流器：未配置 DEMO_ADMIN_TOKEN 时，单 IP 每 5 分钟最多重置 1 次
+_demo_reset_limiter = SlidingWindowLimiter(
+    window_seconds=300,
+    default_limit=1,
+    env_var="DEMO_RESET_RATE_LIMIT_PER_5MIN",
+)
+
+
+def _get_reset_cooldown_seconds() -> int:
+    raw = os.getenv("DEMO_RESET_COOLDOWN_SECONDS")
+    if raw:
+        try:
+            parsed = int(raw.strip())
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return 300
+
+
+def check_demo_admin_token(request: Request) -> None:
+    """
+    演示数据重置双层保护：
+      1. 若配置了 DEMO_ADMIN_TOKEN：强制校验请求头 X-Demo-Admin-Token，不匹配返回 HTTP 403；
+      2. 若未配置 DEMO_ADMIN_TOKEN：启用独立 IP 冷却（默认每 5 分钟最多重置 1 次），超限返回 HTTP 429，
+         防止公网演示数据被恶意高频刷乱。
+    """
+    expected = os.getenv("DEMO_ADMIN_TOKEN", "").strip()
+    if expected:
+        provided = request.headers.get("X-Demo-Admin-Token", "").strip()
+        if provided != expected:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="当前环境已启用演示管理口令保护，请在 X-Demo-Admin-Token 中提供正确的口令。",
+            )
+        return
+
+    _demo_reset_limiter.window_seconds = _get_reset_cooldown_seconds()
+    client_ip = get_client_ip(request)
+    try:
+        _demo_reset_limiter.check(client_ip)
+    except HTTPException as exc:
+        retry_after = (exc.headers or {}).get("Retry-After", str(_demo_reset_limiter.window_seconds))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"公开演示环境限制每 {_demo_reset_limiter.window_seconds // 60 or 1} 分钟最多重置 1 次，请在 {retry_after} 秒后重试。",
+            headers={"Retry-After": retry_after},
+        ) from exc

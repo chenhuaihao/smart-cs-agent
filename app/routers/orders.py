@@ -1,12 +1,17 @@
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from app.core.limiter import check_api_read_rate_limit
 from app.db.database import get_db_connection
 from app.schemas.order import OrderResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/orders", tags=["orders"])
+router = APIRouter(
+    prefix="/api/orders",
+    tags=["orders"],
+    dependencies=[Depends(check_api_read_rate_limit)],
+)
 
 
 @router.get(

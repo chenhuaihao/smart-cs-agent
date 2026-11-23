@@ -26,16 +26,23 @@ htmlcov/
 .env.*
 !.env.example
 
-# 本地运行生成的数据库文件（由 Docker volume 挂载管理）
+# 本地运行生成的数据库与向量库文件（由 Docker volume 挂载管理）
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 *.sqlite3
 *.sqlite3-journal
+data/chroma_db/
+chroma_data/
+
+# 前端依赖与本地构建产物（容器内由 Stage 1 干净构建）
+frontend/node_modules/
+frontend/dist/
 
 # 自动化评测报告与本地运行日志
 eval/eval_report.md
+eval/rag_eval_report.md
 logs/
 *.log
 
