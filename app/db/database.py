@@ -141,6 +141,21 @@ def init_db() -> None:
     CREATE INDEX IF NOT EXISTS idx_chat_turns_session ON chat_turns (session_id, created_at);
     """
 
+    # v2.0 P1：高风险写工具（如 create_after_sales_ticket）HITL 待确认持久化表
+    create_chat_approvals_sql = """
+    CREATE TABLE IF NOT EXISTS chat_approvals (
+        turn_id TEXT PRIMARY KEY,
+        tool_name TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        args TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'waiting_approval',
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        FOREIGN KEY (turn_id) REFERENCES chat_turns (turn_id)
+    );
+    """
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(create_orders_sql)
@@ -149,6 +164,7 @@ def init_db() -> None:
         cursor.execute(create_chat_turns_sql)
         cursor.execute(create_chat_events_sql)
         cursor.execute(create_turns_index_sql)
+        cursor.execute(create_chat_approvals_sql)
         conn.commit()
 
 

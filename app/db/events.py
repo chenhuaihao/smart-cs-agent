@@ -1,10 +1,10 @@
 """
 app/db/events.py
 
-v2.0 事务事件存储：为 SSE 流式推送与 after_seq 断线补发提供唯一可信数据源。
+v2.0 事务事件存储：为 SSE 流式推送、after_seq 断线补发与 HITL 人工确认提供唯一可信数据源。
 
 核心约定：
-  1. 一次用户请求 = 一个 turn（chat_turns 一行），状态 running → completed / failed；
+  1. 一次用户请求 = 一个 turn（chat_turns 一行），状态 running / waiting_approval → completed / failed；
   2. turn 内每个事件按 seq 从 1 开始严格单调递增（chat_events，UNIQUE(turn_id, seq)）；
   3. 业务层必须"先落库拿到 seq，再推送给客户端"——客户端看到的每个 seq 都一定能被补发接口查到；
   4. 终态事件（done / error）与 turn 状态更新在同一事务提交，补发方不会读到"有 done 但仍 running"的中间态。
@@ -22,8 +22,12 @@ from app.db.database import get_db_connection
 logger = logging.getLogger(__name__)
 
 TURN_RUNNING = "running"
+TURN_WAITING_APPROVAL = "waiting_approval"
 TURN_COMPLETED = "completed"
 TURN_FAILED = "failed"
+
+# 允许追加事件的活跃状态（waiting_approval 期间也可在恢复瞬间写入后续事件）
+_ACTIVE_STATUSES = {TURN_RUNNING, TURN_WAITING_APPROVAL}
 
 
 def _now() -> str:
@@ -65,17 +69,13 @@ def _insert_event(
 ) -> dict[str, Any]:
     """
     在调用方已开启的写事务中分配 seq 并插入事件。
-
-    为什么 seq 用 MAX(seq)+1 且必须处于 BEGIN IMMEDIATE 事务内：
-      IMMEDIATE 会在事务开始时就拿到库级写锁，"读 MAX → 写入"之间不可能插入其他写者，
-      因此同一 turn 内 seq 天然连续、严格递增；UNIQUE(turn_id, seq) 再兜底拒绝任何重复。
+    处于 BEGIN IMMEDIATE 事务内，保证同一 turn 内 seq 连续严格递增。
     """
     cursor.execute("SELECT status FROM chat_turns WHERE turn_id = ?;", (turn_id,))
     turn = cursor.fetchone()
     if turn is None:
         raise ValueError(f"turn_id={turn_id} 不存在，拒绝写入事件")
-    if turn["status"] != TURN_RUNNING:
-        # 终态之后不允许再追加事件，否则补发方会在 done 之后读到"幽灵事件"
+    if turn["status"] not in _ACTIVE_STATUSES:
         raise ValueError(f"turn_id={turn_id} 已结束（status={turn['status']}），拒绝写入事件")
 
     cursor.execute(
@@ -102,10 +102,126 @@ def append_event(turn_id: str, event_type: str, payload: dict[str, Any]) -> dict
             record = _insert_event(conn.cursor(), turn_id, event_type, payload)
             conn.commit()
     except (sqlite3.Error, ValueError):
-        # 异常时 get_db_connection 已自动回滚；这里补充结构化日志后继续上抛，由编排层决定如何收尾
         logger.exception("append_event 失败 turn_id=%s type=%s", turn_id, event_type)
         raise
     return record
+
+
+def save_pending_approval(
+    turn_id: str,
+    tool_name: str,
+    call_id: str,
+    args: dict[str, Any],
+    summary: str,
+) -> dict[str, Any]:
+    """
+    高风险写操作 HITL 暂停：
+    在同一事务中：
+      1. 持久化待确认请求到 chat_approvals（status='waiting_approval'）；
+      2. 将 chat_turns.status 设为 'waiting_approval'；
+      3. 写入 event: approval_required 事件并返回该事件记录（带 seq）。
+    """
+    payload = {
+        "turn_id": turn_id,
+        "tool": tool_name,
+        "call_id": call_id,
+        "args": args,
+        "summary": summary,
+    }
+    now = _now()
+    try:
+        with get_db_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            cursor = conn.cursor()
+            record = _insert_event(cursor, turn_id, "approval_required", payload)
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO chat_approvals
+                    (turn_id, tool_name, call_id, args, summary, status, created_at, decided_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL);
+                """,
+                (
+                    turn_id,
+                    tool_name,
+                    call_id,
+                    json.dumps(args, ensure_ascii=False),
+                    summary,
+                    TURN_WAITING_APPROVAL,
+                    now,
+                ),
+            )
+            cursor.execute(
+                "UPDATE chat_turns SET status = ? WHERE turn_id = ?;",
+                (TURN_WAITING_APPROVAL, turn_id),
+            )
+            conn.commit()
+    except (sqlite3.Error, ValueError):
+        logger.exception("save_pending_approval 失败 turn_id=%s tool=%s", turn_id, tool_name)
+        raise
+    logger.info("save_pending_approval turn_id=%s tool=%s summary=%s", turn_id, tool_name, summary)
+    return record
+
+
+def resolve_pending_approval(turn_id: str, approved: bool) -> dict[str, Any] | None:
+    """
+    记录用户对高风险写操作的审批决策，并将 turn 状态切回 running 以便继续收尾。
+    返回待确认请求详情字典；若不存在处于 waiting_approval 的记录则返回 None。
+    """
+    decision_status = "approved" if approved else "rejected"
+    try:
+        with get_db_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            cursor = conn.cursor()
+            row = cursor.execute(
+                """
+                SELECT turn_id, tool_name, call_id, args, summary, status
+                FROM chat_approvals
+                WHERE turn_id = ?;
+                """,
+                (turn_id,),
+            ).fetchone()
+            if row is None or row["status"] != TURN_WAITING_APPROVAL:
+                conn.rollback()
+                return None
+            cursor.execute(
+                "UPDATE chat_approvals SET status = ?, decided_at = ? WHERE turn_id = ?;",
+                (decision_status, _now(), turn_id),
+            )
+            cursor.execute(
+                "UPDATE chat_turns SET status = ? WHERE turn_id = ?;",
+                (TURN_RUNNING, turn_id),
+            )
+            conn.commit()
+            return {
+                "turn_id": row["turn_id"],
+                "tool_name": row["tool_name"],
+                "call_id": row["call_id"],
+                "args": json.loads(row["args"]),
+                "summary": row["summary"],
+                "status": decision_status,
+            }
+    except sqlite3.Error:
+        logger.exception("resolve_pending_approval 失败 turn_id=%s", turn_id)
+        raise
+
+
+def get_pending_approval(turn_id: str) -> dict[str, Any] | None:
+    """查询指定 turn 的审批记录。"""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT turn_id, tool_name, call_id, args, summary, status FROM chat_approvals WHERE turn_id = ?;",
+            (turn_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "turn_id": row["turn_id"],
+        "tool_name": row["tool_name"],
+        "call_id": row["call_id"],
+        "args": json.loads(row["args"]),
+        "summary": row["summary"],
+        "status": row["status"],
+    }
 
 
 def finish_turn(
@@ -137,7 +253,6 @@ def finish_turn(
         with get_db_connection() as conn:
             conn.execute("BEGIN IMMEDIATE;")
             cursor = conn.cursor()
-            # 先插事件（此时 status 仍是 running，可通过校验），再翻转状态
             record = _insert_event(cursor, turn_id, final_event_type, final_payload)
             cursor.execute(
                 update_sql,
@@ -162,7 +277,7 @@ def get_turn(turn_id: str) -> dict[str, Any] | None:
     """查询 turn 概要信息，不存在返回 None。"""
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT turn_id, session_id, status, ttft_ms, latency_ms FROM chat_turns WHERE turn_id = ?;",
+            "SELECT turn_id, session_id, user_message, status, ttft_ms, latency_ms FROM chat_turns WHERE turn_id = ?;",
             (turn_id,),
         ).fetchone()
     return dict(row) if row else None
@@ -171,7 +286,6 @@ def get_turn(turn_id: str) -> dict[str, Any] | None:
 def get_events_after(turn_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
     """
     断线补发：返回 seq > after_seq 的全部事件，按 seq 升序。
-    客户端只需记住最后收到的 SSE id，重连时作为 after_seq 传入即可"不重不漏"。
     """
     sql = """
     SELECT seq, event_type, payload, created_at

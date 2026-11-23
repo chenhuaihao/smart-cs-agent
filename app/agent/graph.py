@@ -1,16 +1,15 @@
 """
 app/agent/graph.py
 
-v2.0 LangGraph 状态机：用 StateGraph 重构 v1.0 的 for 循环式 Function Calling。
+v2.0 P1 LangGraph 状态机：引入证据账本（EvidenceLedger）、规则校验（policy_verifier）、
+降级节点（fallback_node）、步数/单步超时护栏与高风险写操作 HITL 挂起。
 
-    START → agent ──(有 tool_calls)──→ tools ──→ agent → ... → END
-                 └──(无 tool_calls / 步数耗尽)──→ END
-
-  - agent_node：调用 BaseLLMProvider 流式推理，逐 token 发出 token 事件；
-  - tool_node ：复用 app/agent/tools.py 的 execute_tool，累积 tools_called 与 citations；
-  - 节点内通过 adispatch_custom_event 发出业务事件（stage / token / tool_call / citation），
-    由 core.py 用 astream_events(version="v2") 统一消费、落库、推送。
-节点本身不碰 SQLite 事件表，保证"图只负责推理，持久化与协议由 core 统一兜底"。
+    START → agent ──(有 tool_calls)────→ tools ──→ agent
+              │
+              ├──(无 tool_calls)───────→ policy_verifier ──(pass)─────────────→ END
+              │                                 ├──(fail & retry_count <= 2)──→ agent
+              │                                 └──(fail & retry_count > 2)───→ fallback → END
+              └──(步数耗尽 / 超时 / 异常)─→ fallback ─────────────────────────────→ END
 """
 
 import asyncio
@@ -18,27 +17,34 @@ import json
 import logging
 import operator
 import time
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Callable, TypedDict
 
 from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from app.agent.guardrails import (
+    HIGH_RISK_TOOLS,
+    MAX_VERIFY_RETRIES,
+    EvidenceLedger,
+    build_fallback_reply,
+    get_max_steps,
+    get_step_timeout_sec,
+    merge_ledger,
+    record_tool_evidence,
+    verify_reply_against_ledger,
+)
 from app.agent.tools import TOOLS_SCHEMA, execute_tool
 from app.llm.base import BaseLLMProvider, ToolCallRequest
 from app.llm.factory import get_llm_provider
 
 logger = logging.getLogger(__name__)
 
-# 与 v1.0 一致：最多 6 次大模型推理（知识库检索可能多消耗一步）
-MAX_STEPS = 6
-# LangGraph 每个节点执行算一次 superstep：6 轮 × (agent + tools) + 兜底余量
-RECURSION_LIMIT = MAX_STEPS * 2 + 4
+# 默认步数上限与 LangGraph superstep 递归上限余量
+MAX_STEPS = get_max_steps()
+RECURSION_LIMIT = 40
 
-MAX_STEPS_FALLBACK_REPLY = (
-    "非常抱歉，我在处理您的请求时遇到了一点复杂情况，未能及时给出回复。"
-    "建议您稍后重试，或联系人工客服为您进一步处理。"
-)
+MAX_STEPS_FALLBACK_REPLY = build_fallback_reply("单轮工具推理步数达到安全上限")
 LLM_ERROR_REPLY = "抱歉，我暂时无法连接到后端服务，请稍后重试。如有紧急问题，可联系人工客服。"
 
 
@@ -52,21 +58,22 @@ def merge_citations(left: list[str] | None, right: list[str] | None) -> list[str
 
 
 class AgentState(TypedDict, total=False):
-    """图状态。messages 直接使用 OpenAI 字典格式，保持与 Provider 协议一致、无需转换。"""
+    """图状态（含 P1 新增的 evidence_ledger、retry_count 与 fallback_reason）。"""
 
     messages: Annotated[list[dict[str, Any]], operator.add]
-    pending_tool_calls: list[dict[str, Any]]  # 本步模型请求的工具调用，tool_node 消费后清空
+    pending_tool_calls: list[dict[str, Any]]
     tools_called: Annotated[list[str], operator.add]
     citations: Annotated[list[str], merge_citations]
+    evidence_ledger: Annotated[EvidenceLedger, merge_ledger]
     final_reply: str
     steps: int
+    retry_count: int
+    verifier_passed: bool
+    fallback_reason: str
 
 
 def extract_citations(tool_name: str, tool_result: str) -> list[str]:
-    """
-    从 search_knowledge_base 的结构化 JSON 结果中提取 "文件名#章节名"（保序去重）。
-    直接解析工具结果而非依赖模型措辞，可靠性 100%（与 v1.0 逻辑一致）。
-    """
+    """从 search_knowledge_base 的结构化 JSON 结果中提取 "文件名#章节名"（保序去重）。"""
     if tool_name != "search_knowledge_base":
         return []
     try:
@@ -74,7 +81,6 @@ def extract_citations(tool_name: str, tool_result: str) -> list[str]:
     except json.JSONDecodeError:
         return []
     if not isinstance(data, list):
-        # {"error": ...} 等非列表结构没有可提取的引用
         return []
 
     citations: list[str] = []
@@ -87,41 +93,67 @@ def extract_citations(tool_name: str, tool_result: str) -> list[str]:
 
 
 def _get_provider(config: RunnableConfig) -> BaseLLMProvider:
-    """优先使用调用方经 config 注入的 Provider（便于测试 / 多租户），否则取全局单例。"""
     provider = (config.get("configurable") or {}).get("provider")
     return provider if provider is not None else get_llm_provider()
 
 
-def _safe_json(arguments: str) -> Any:
-    """工具参数解析失败时原样返回字符串，事件推送不应因模型输出脏 JSON 而中断。"""
+def _safe_json(arguments: str | dict[str, Any]) -> Any:
+    if isinstance(arguments, dict):
+        return arguments
     try:
         return json.loads(arguments)
     except (json.JSONDecodeError, TypeError):
         return arguments
 
 
-async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """推理节点：流式调用模型，文本增量实时发 token 事件，工具调用交给 tool_node。"""
-    steps = state.get("steps", 0)
-    if steps >= MAX_STEPS:
-        # 步数耗尽仍在要工具：不再调用模型，直接友好兜底（行为与 v1.0 一致）
-        logger.warning("agent_node 达到最大步数 %d，返回兜底回复", MAX_STEPS)
-        return {"final_reply": MAX_STEPS_FALLBACK_REPLY, "pending_tool_calls": []}
-
-    step = steps + 1
-    await adispatch_custom_event("stage", {"stage": "thinking", "step": step}, config=config)
-
+async def _consume_llm_stream(
+    provider: BaseLLMProvider,
+    messages: list[dict[str, Any]],
+    step: int,
+    config: RunnableConfig,
+) -> tuple[str, list[ToolCallRequest]]:
+    """消费一次 Provider 流式推理并实时派发 token 事件。"""
     text_parts: list[str] = []
     tool_calls: list[ToolCallRequest] = []
-    # Provider 异常不在节点内吞掉：上抛给 core，由 core 统一写 error 终态事件
-    async for chunk in _get_provider(config).astream_chat(state["messages"], TOOLS_SCHEMA):
+    async for chunk in provider.astream_chat(messages, TOOLS_SCHEMA):
         if chunk.type == "text_delta" and chunk.text:
             text_parts.append(chunk.text)
             await adispatch_custom_event("token", {"delta": chunk.text, "step": step}, config=config)
         elif chunk.type == "tool_calls":
             tool_calls.extend(chunk.tool_calls)
+    return "".join(text_parts), tool_calls
 
-    text = "".join(text_parts)
+
+async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """推理节点：带步数预算与单步超时护栏，流式调用模型。"""
+    cfg = config.get("configurable") or {}
+    max_steps = int(cfg.get("max_steps") or get_max_steps())
+    step_timeout = float(cfg.get("step_timeout_sec") or get_step_timeout_sec())
+
+    steps = state.get("steps", 0)
+    if steps >= max_steps:
+        logger.warning("agent_node 达到最大步数 %d，转入 fallback_node", max_steps)
+        return {
+            "pending_tool_calls": [],
+            "fallback_reason": f"单轮推理/工具步数已达上限（MAX_STEPS={max_steps}）",
+        }
+
+    step = steps + 1
+    await adispatch_custom_event("stage", {"stage": "thinking", "step": step}, config=config)
+
+    try:
+        text, tool_calls = await asyncio.wait_for(
+            _consume_llm_stream(_get_provider(config), state["messages"], step, config),
+            timeout=step_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("agent_node 单步 LLM 超时 step=%d timeout=%ss", step, step_timeout)
+        return {
+            "pending_tool_calls": [],
+            "steps": step,
+            "fallback_reason": f"大模型单步推理超时（>{step_timeout}s）",
+        }
+
     logger.info("agent_node step=%d text_len=%d tool_calls=%d", step, len(text), len(tool_calls))
 
     if tool_calls:
@@ -137,6 +169,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             "messages": [assistant_msg],
             "pending_tool_calls": [tc.model_dump() for tc in tool_calls],
             "steps": step,
+            "fallback_reason": "",
         }
 
     return {
@@ -144,37 +177,83 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         "final_reply": text,
         "pending_tool_calls": [],
         "steps": step,
+        "fallback_reason": "",
     }
 
 
 async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """工具节点：顺序执行本步全部工具调用，发出 tool_call / citation 事件并回填 tool 消息。"""
+    """
+    工具节点：
+      1. 遇到高风险写工具（create_after_sales_ticket）且 auto_approve=False 时，
+         通过 approval_handler 持久化待确认请求、推送 approval_required 事件并挂起等待；
+      2. 执行工具后自动更新 evidence_ledger，并通过 citation / stage 事件透传。
+    """
+    cfg = config.get("configurable") or {}
+    auto_approve: bool = bool(cfg.get("auto_approve", True))
+    approval_handler: Callable[[dict[str, Any]], Any] | None = cfg.get("approval_handler")
+    step_timeout = float(cfg.get("step_timeout_sec") or get_step_timeout_sec())
+
     calls = state.get("pending_tool_calls") or []
     await adispatch_custom_event(
         "stage", {"stage": "tool_running", "tools": [c["name"] for c in calls]}, config=config
     )
 
+    current_ledger = state.get("evidence_ledger") or EvidenceLedger()
     known_citations = list(state.get("citations") or [])
     tool_messages: list[dict[str, Any]] = []
     names: list[str] = []
     new_citations: list[str] = []
 
     for call in calls:
+        tool_name = call["name"]
+        parsed_args = _safe_json(call["arguments"])
+
+        # 高风险写操作 HITL 拦截：暂停落库，等待用户显式确认
+        if tool_name in HIGH_RISK_TOOLS and not auto_approve and approval_handler is not None:
+            approved = await approval_handler(call)
+            if not approved:
+                cancel_res = json.dumps(
+                    {"cancelled": True, "message": "用户已取消创建售后工单，请告知用户已取消建单，切勿声称已创建。"},
+                    ensure_ascii=False,
+                )
+                await adispatch_custom_event(
+                    "tool_call",
+                    {
+                        "call_id": call["id"],
+                        "name": tool_name,
+                        "arguments": parsed_args,
+                        "status": "cancelled",
+                        "duration_ms": 0,
+                    },
+                    config=config,
+                )
+                tool_messages.append({"role": "tool", "tool_call_id": call["id"], "content": cancel_res})
+                continue
+
         started = time.monotonic()
-        # execute_tool 是同步函数（含 SQLite / BM25），放到线程池执行，避免阻塞事件循环里的其他 SSE 连接
-        result: str = await asyncio.to_thread(execute_tool, call["name"], call["arguments"])
+        try:
+            result: str = await asyncio.wait_for(
+                asyncio.to_thread(execute_tool, tool_name, call["arguments"]),
+                timeout=step_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("tool_node 单步工具超时 tool=%s timeout=%ss", tool_name, step_timeout)
+            return {
+                "pending_tool_calls": [],
+                "fallback_reason": f"工具 {tool_name} 执行超时（>{step_timeout}s）",
+            }
+
         duration_ms = int((time.monotonic() - started) * 1000)
-        names.append(call["name"])
+        names.append(tool_name)
 
         parsed = _safe_json(result)
         failed = isinstance(parsed, dict) and "error" in parsed
-        # 只推送工具名、参数与执行状态，不推送工具原始 JSON（含订单隐私 / 知识库原文）
         await adispatch_custom_event(
             "tool_call",
             {
                 "call_id": call["id"],
-                "name": call["name"],
-                "arguments": _safe_json(call["arguments"]),
+                "name": tool_name,
+                "arguments": parsed_args,
                 "status": "error" if failed else "success",
                 "duration_ms": duration_ms,
             },
@@ -182,7 +261,7 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]
         )
 
         fresh = [
-            c for c in extract_citations(call["name"], result)
+            c for c in extract_citations(tool_name, result)
             if c not in known_citations and c not in new_citations
         ]
         if fresh:
@@ -191,32 +270,137 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]
                 "citation", {"call_id": call["id"], "citations": fresh}, config=config
             )
 
+        # 更新证据账本并通过 stage 事件透传最新账本摘要
+        current_ledger = record_tool_evidence(current_ledger, tool_name, parsed_args, result, fresh)
+        await adispatch_custom_event(
+            "stage",
+            {
+                "stage": "evidence_updated",
+                "tool": tool_name,
+                "evidence_ledger": current_ledger.model_dump(),
+            },
+            config=config,
+        )
+
         tool_messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
-        logger.info("tool_node 完成 tool=%s status=%s duration_ms=%d", call["name"], not failed, duration_ms)
+        logger.info("tool_node 完成 tool=%s status=%s duration_ms=%d", tool_name, not failed, duration_ms)
 
     return {
         "messages": tool_messages,
         "tools_called": names,
         "citations": new_citations,
+        "evidence_ledger": current_ledger,
         "pending_tool_calls": [],
     }
 
 
+async def policy_verifier_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """
+    规则校验节点：用 EvidenceLedger 硬校验模型最终回复。
+    校验失败时将具体违规原因注入 messages 触发 agent_node 重写（最多重试 MAX_VERIFY_RETRIES=2 次）。
+    """
+    reply = state.get("final_reply") or ""
+    ledger = state.get("evidence_ledger") or EvidenceLedger()
+    reasons = verify_reply_against_ledger(reply, ledger)
+
+    await adispatch_custom_event(
+        "stage",
+        {"stage": "verifying", "passed": len(reasons) == 0, "reasons": reasons},
+        config=config,
+    )
+
+    if not reasons:
+        return {"verifier_passed": True, "fallback_reason": ""}
+
+    retry_count = state.get("retry_count", 0) + 1
+    reason_text = "；".join(reasons)
+    logger.warning("policy_verifier 拦截 retry=%d/%d reasons=%s", retry_count, MAX_VERIFY_RETRIES, reason_text)
+
+    if retry_count <= MAX_VERIFY_RETRIES:
+        feedback_msg = {
+            "role": "user",
+            "content": (
+                f"【系统规则校验未通过（第 {retry_count}/{MAX_VERIFY_RETRIES} 次重写）】\n"
+                f"违规原因：{reason_text}\n"
+                "请立即纠正：1) 若未查询订单，必须先调用 query_order 工具或请用户提供订单号，严禁凭空编造订单状态与运单号；"
+                "2) 若未调用或用户取消了 create_after_sales_ticket，严禁声称已创建工单。请重新生成合规答复或调用所需工具。"
+            ),
+        }
+        return {
+            "verifier_passed": False,
+            "retry_count": retry_count,
+            "messages": [feedback_msg],
+        }
+
+    return {
+        "verifier_passed": False,
+        "retry_count": retry_count,
+        "fallback_reason": f"回复连续 {MAX_VERIFY_RETRIES} 次未通过证据账本规则校验（{reason_text}）",
+    }
+
+
+async def fallback_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """降级节点：当校验连续失败、步数超限或超时时，输出带明确原因的安全兜底提示并引导转人工。"""
+    reason = state.get("fallback_reason") or "触发安全护栏限制"
+    reply = build_fallback_reply(reason)
+    logger.warning("fallback_node 触发降级 reason=%s", reason)
+    await adispatch_custom_event(
+        "stage", {"stage": "fallback", "reason": reason}, config=config
+    )
+    await adispatch_custom_event(
+        "token", {"delta": reply, "step": state.get("steps", 0), "fallback": True}, config=config
+    )
+    return {"final_reply": reply}
+
+
 def _route_after_agent(state: AgentState) -> str:
-    """有待执行的工具调用则进入 tools，否则结束。"""
-    return "tools" if state.get("pending_tool_calls") else END
+    if state.get("fallback_reason"):
+        return "fallback"
+    if state.get("pending_tool_calls"):
+        return "tools"
+    return "policy_verifier"
+
+
+def _route_after_tools(state: AgentState) -> str:
+    if state.get("fallback_reason"):
+        return "fallback"
+    return "agent"
+
+
+def _route_after_verifier(state: AgentState) -> str:
+    if state.get("verifier_passed"):
+        return END
+    if state.get("retry_count", 0) <= MAX_VERIFY_RETRIES and not state.get("fallback_reason"):
+        return "agent"
+    return "fallback"
 
 
 def build_graph() -> Any:
-    """构建并编译状态机（无 checkpointer：对话记忆仍由 chat_logs 负责，保持 v1.0 语义）。"""
+    """构建并编译 P1 状态机（agent / tools / policy_verifier / fallback）。"""
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
+    graph.add_node("policy_verifier", policy_verifier_node)
+    graph.add_node("fallback", fallback_node)
+
     graph.add_edge(START, "agent")
-    graph.add_conditional_edges("agent", _route_after_agent, {"tools": "tools", END: END})
-    graph.add_edge("tools", "agent")
+    graph.add_conditional_edges(
+        "agent",
+        _route_after_agent,
+        {"tools": "tools", "policy_verifier": "policy_verifier", "fallback": "fallback"},
+    )
+    graph.add_conditional_edges(
+        "tools",
+        _route_after_tools,
+        {"agent": "agent", "fallback": "fallback"},
+    )
+    graph.add_conditional_edges(
+        "policy_verifier",
+        _route_after_verifier,
+        {"agent": "agent", "fallback": "fallback", END: END},
+    )
+    graph.add_edge("fallback", END)
     return graph.compile()
 
 
-# 模块级编译一次即可复用：编译后的图是无状态的，每次 astream_events 传入独立的初始 state
 agent_graph = build_graph()
