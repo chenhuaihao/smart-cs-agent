@@ -1,12 +1,15 @@
 """
 app/core/limiter.py
 
-轻量级内存滑动窗口限流模块（纯 Python 标准库实现）：
-- 零外部依赖：仅使用 time, threading, collections, os；
-- 兼容反向代理：优先从 X-Forwarded-For 请求头解析客户端真实 IP；
-- 滑动窗口算法：以 60 秒为滑动时间窗口，精确记录并统计每 IP 的请求时间戳；
-- 环境变量配置：支持通过 RATE_LIMIT_PER_MINUTE 动态配置（默认 15 次/分钟）；
-- 超限友好提示：超限时抛出 HTTP 429 Too Many Requests，附带 Retry-After 标头与中文友好 JSON 提示；
+轻量级内存限流与用量熔断模块（纯 Python 标准库实现）：
+- 零外部依赖：仅使用 time, threading, collections, os, datetime；
+- 兼容反向代理：优先从 X-Forwarded-For（首个有效 IP）及 X-Real-IP 解析客户端真实 IP；
+- 单 IP 滑动窗口限流：以 60 秒为滑动时间窗口，精确记录并统计每 IP 的请求时间戳；
+- 全局每日用量熔断：按北京时间（UTC+8）每日 00:00 自动重置计数，防止公网演示被刷爆；
+- 环境变量配置：
+    - RATE_LIMIT_PER_MINUTE（默认 15 次/分钟/IP）
+    - DAILY_CHAT_LIMIT（默认 200 次/日全局）
+- 超限友好提示：超限时抛出 HTTP 429 Too Many Requests，错误信息中脱敏去除了客户端真实 IP；
 - 内存防爆机制：内置惰性过期淘汰机制，防止高并发场景下内存无限膨胀。
 """
 
@@ -14,10 +17,18 @@ import os
 import threading
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from fastapi import HTTPException, Request, status
 
+# 北京时间时区定义 (UTC+8)
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+# ==============================================================================
+# 1. 单 IP 滑动窗口限流器 (SlidingWindowLimiter)
+# ==============================================================================
 
 class SlidingWindowLimiter:
     """
@@ -53,7 +64,7 @@ class SlidingWindowLimiter:
         """
         检查指定客户端 IP 是否超限：
         1. 剔除超过滑动窗口 (当前时间 - window_seconds) 的历史请求；
-        2. 若窗口内请求数已达到上限，计算需等待的秒数，抛出 HTTP 429；
+        2. 若窗口内请求数已达到上限，计算需等待的秒数，抛出 HTTP 429（不暴露客户端 IP）；
         3. 若未超限，记录本次请求时间戳；
         4. 定期惰性清理长期未活跃 IP，防止内存泄漏。
         """
@@ -74,10 +85,7 @@ class SlidingWindowLimiter:
                 self._history[client_ip] = valid_timestamps
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=(
-                        f"请求过于频繁，请稍后再试。系统当前限制每分钟最多请求 {limit} 次"
-                        f"（客户端 IP: {client_ip}，请在 {retry_after} 秒后重试）。"
-                    ),
+                    detail=f"请求过于频繁，请稍后再试（每分钟限制 {limit} 次，请在 {retry_after} 秒后重试）。",
                     headers={"Retry-After": str(retry_after)},
                 )
 
@@ -102,24 +110,106 @@ class SlidingWindowLimiter:
             del self._history[ip]
 
 
-# 模块级全局单例限流器
+# 模块级单 IP 限流单例
 _chat_limiter = SlidingWindowLimiter()
 
+
+# ==============================================================================
+# 2. 每日全局调用用量熔断器 (DailyQuotaLimiter)
+# ==============================================================================
+
+class DailyQuotaLimiter:
+    """
+    基于内存的每日全局用量熔断限流器。
+
+    - 按北京时间（UTC+8）自然日 00:00 自动重置当日计数器；
+    - 读取环境变量 DAILY_CHAT_LIMIT，默认上限 200 次/天；
+    - 达到上限直接熔断抛出 HTTP 429，防止公网演示环境下被刷爆；
+    - 采用 threading.Lock 保证并发读写安全性。
+    """
+
+    def __init__(self, default_limit: int = 200) -> None:
+        self.default_limit = default_limit
+        self._current_date_str: str = ""
+        self._count: int = 0
+        self._lock = threading.Lock()
+
+    def _get_limit(self) -> int:
+        """
+        动态读取环境变量 DAILY_CHAT_LIMIT，支持覆盖默认上限。
+        """
+        env_val = os.getenv("DAILY_CHAT_LIMIT")
+        if env_val:
+            try:
+                parsed = int(env_val.strip())
+                if parsed > 0:
+                    return parsed
+            except ValueError:
+                pass
+        return self.default_limit
+
+    def check_and_increment(self) -> None:
+        """
+        判定是否超出当日全局总配额：
+        - 跨日（北京时间 00:00）自动重置当日计数；
+        - 超限抛出 HTTP 429 熔断异常；
+        - 未超限则自增计数并放行。
+        """
+        now_beijing = datetime.now(BEIJING_TZ)
+        today_str = now_beijing.strftime("%Y-%m-%d")
+        limit = self._get_limit()
+
+        with self._lock:
+            # 跨自然日自动归零重置
+            if today_str != self._current_date_str:
+                self._current_date_str = today_str
+                self._count = 0
+
+            # 达到或超出每日总限额直接抛出 429
+            if self._count >= limit:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="今日公网演示总额度已用完，请明日 0 点后再试。",
+                )
+
+            self._count += 1
+
+    def get_stats(self) -> dict:
+        """获取当前配额使用快照（用于诊断与监控）"""
+        with self._lock:
+            return {
+                "date": self._current_date_str,
+                "used": self._count,
+                "limit": self._get_limit(),
+            }
+
+
+# 模块级每日全局配额熔断器单例
+_daily_quota_limiter = DailyQuotaLimiter()
+
+
+# ==============================================================================
+# 3. 辅助函数与 FastAPI 依赖项
+# ==============================================================================
 
 def get_client_ip(request: Request) -> str:
     """
     解析请求的真实客户端 IP：
-    1. 优先检查反向代理（如 Nginx、Traefik、SLB）透传的 X-Forwarded-For 请求头；
-    2. 若存在多级代理，取最左侧的原始客户端 IP；
-    3. 若无该请求头，取底层 socket 的 request.client.host；
-    4. 若仍为空则回退至 '127.0.0.1'。
+    1. 优先检查反向代理（如 Nginx、Traefik、SLB）透传的 X-Forwarded-For 请求头（取首个非空有效 IP）；
+    2. 其次检查 X-Real-IP 请求头；
+    3. 若无反向代理请求头，回退至底层的 request.client.host；
+    4. 若仍获取不到，兜底返回 '127.0.0.1'。
     """
     x_forwarded_for = request.headers.get("X-Forwarded-For")
     if x_forwarded_for:
-        # X-Forwarded-For: <client>, <proxy1>, <proxy2>
-        client_ip = x_forwarded_for.split(",")[0].strip()
-        if client_ip:
-            return client_ip
+        for part in x_forwarded_for.split(","):
+            cleaned = part.strip()
+            if cleaned:
+                return cleaned
+
+    x_real_ip = request.headers.get("X-Real-IP")
+    if x_real_ip and x_real_ip.strip():
+        return x_real_ip.strip()
 
     if request.client and request.client.host:
         return request.client.host
@@ -129,8 +219,16 @@ def get_client_ip(request: Request) -> str:
 
 def check_chat_rate_limit(request: Request) -> None:
     """
-    挂载在 POST /api/chat 的 FastAPI 依赖项函数。
+    挂载在 POST /api/chat 的单 IP 频次限流依赖项。
     在执行任何 Agent 思考或大模型 API 调用前进行防刷拦截。
     """
     client_ip = get_client_ip(request)
     _chat_limiter.check(client_ip)
+
+
+def check_daily_quota_limit() -> None:
+    """
+    挂载在 POST /api/chat 的每日全局调用上限熔断依赖项。
+    按北京时间每日 00:00 自动重置，超出上限直接返回 HTTP 429。
+    """
+    _daily_quota_limiter.check_and_increment()

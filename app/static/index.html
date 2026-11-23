@@ -192,8 +192,8 @@
     <main class="flex-1 lg:w-[67%] flex flex-col min-w-0 bg-white lg:border-r border-zinc-200">
 
       <!-- 顶部导航栏 -->
-      <header class="h-14 shrink-0 px-4 sm:px-6 border-b border-zinc-200 flex items-center justify-between gap-3 bg-white">
-        <div class="flex items-center gap-3 min-w-0">
+      <header class="h-14 shrink-0 px-3 sm:px-6 border-b border-zinc-200 flex items-center justify-between gap-2 sm:gap-3 bg-white">
+        <div class="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1 mr-1">
           <!-- 克制的墨绿极简图标 -->
           <div class="w-8 h-8 rounded-lg bg-brand-700 text-white flex items-center justify-center shrink-0 shadow-xs">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -203,28 +203,40 @@
               <path d="M16 10h.01"></path>
             </svg>
           </div>
-          <div class="min-w-0">
-            <div class="flex items-center gap-2">
-              <h1 class="text-sm sm:text-[15px] font-semibold text-zinc-900 tracking-tight truncate">
-                Smart CS Agent 智能售后工作台
-              </h1>
-              <span class="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-brand-50 text-brand-700 border border-brand-200">
-                <span class="w-1.5 h-1.5 rounded-full bg-brand-600"></span>
-                在线
-              </span>
-            </div>
+          <div class="min-w-0 flex items-center gap-1.5 sm:gap-2 truncate">
+            <h1 class="text-sm sm:text-[15px] font-semibold text-zinc-900 tracking-tight truncate min-w-0">
+              Smart CS Agent <span class="hidden md:inline text-zinc-500 font-normal">| 智能售后工作台</span>
+            </h1>
+            <span class="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-brand-50 text-brand-700 border border-brand-200 whitespace-nowrap shrink-0">
+              <span class="w-1.5 h-1.5 rounded-full bg-brand-600"></span>
+              在线
+            </span>
           </div>
         </div>
 
-        <div class="flex items-center gap-2 shrink-0">
+        <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          <!-- 关于项目 / GitHub 链接按钮 -->
+          <a
+            href="https://github.com/chenhuaihao/smart-cs-agent"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="查看本项目 GitHub 源码与技术文档"
+            class="inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 active:bg-zinc-100 text-xs font-medium text-zinc-700 transition-colors shadow-xs whitespace-nowrap shrink-0"
+          >
+            <svg class="w-3.5 h-3.5 text-zinc-700 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
+            </svg>
+            <span>GitHub</span>
+          </a>
+
           <!-- Session ID 标签（点击可复制） -->
           <button
             id="sessionIdBtn"
             type="button"
-            title="点击复制当前 Session ID"
-            class="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-xs font-mono text-zinc-600 transition-colors"
+            title="点击复制当前会话 ID (Session ID)"
+            class="hidden md:inline-flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 text-xs font-mono text-zinc-600 transition-colors whitespace-nowrap shrink-0"
           >
-            <span class="text-zinc-400 font-sans">SID</span>
+            <span class="text-zinc-400 font-sans">SID:</span>
             <span id="sessionIdText" class="text-zinc-700 font-medium">web_--------</span>
           </button>
 
@@ -232,9 +244,9 @@
           <button
             id="newSessionBtn"
             type="button"
-            class="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 active:bg-zinc-100 text-xs font-medium text-zinc-700 transition-colors"
+            class="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 active:bg-zinc-100 text-xs font-medium text-zinc-700 transition-colors whitespace-nowrap shrink-0"
           >
-            <svg class="w-3.5 h-3.5 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="w-3.5 h-3.5 text-zinc-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 5v14M5 12h14"></path>
             </svg>
             <span>新建会话</span>
@@ -244,9 +256,9 @@
           <button
             id="mobileDrawerBtn"
             type="button"
-            class="lg:hidden inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-xs font-medium text-zinc-700 transition-colors"
+            class="lg:hidden inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-xs font-medium text-zinc-700 transition-colors whitespace-nowrap shrink-0"
           >
-            <svg class="w-3.5 h-3.5 text-brand-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="w-3.5 h-3.5 text-brand-700 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2"></rect>
               <path d="M15 3v18"></path>
             </svg>
@@ -258,7 +270,7 @@
 
       <!-- 移动端 Session ID 副栏 -->
       <div class="sm:hidden px-4 py-1.5 bg-zinc-50 border-b border-zinc-200 flex items-center justify-between text-[11px] text-zinc-500">
-        <span>当前会话：<code id="mobileSessionIdText" class="font-mono text-zinc-700">web_--------</code></span>
+        <span>当前会话ID (SID)：<code id="mobileSessionIdText" class="font-mono text-zinc-700">web_--------</code></span>
         <span class="inline-flex items-center gap-1 text-brand-700">
           <span class="w-1.5 h-1.5 rounded-full bg-brand-600"></span>
           服务就绪
@@ -270,28 +282,60 @@
         <div id="chatContainer" class="max-w-3xl mx-auto space-y-5">
 
           <!-- 空状态欢迎卡片 -->
-          <section id="emptyState" class="py-2 sm:py-3">
-            <div class="bg-white border border-zinc-200 rounded-xl p-4 sm:p-5 shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
-              <div class="flex items-start gap-3.5">
-                <div class="w-9 h-9 rounded-lg bg-brand-50 border border-brand-200 text-brand-700 flex items-center justify-center shrink-0 mt-0.5">
-                  <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <section id="emptyState" class="py-1 sm:py-1.5">
+            <div class="bg-white border border-zinc-200 rounded-xl p-3.5 sm:p-4 shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
+              
+              <!-- 紧凑折叠式项目定位条（默认单行，可展开完整详情） -->
+              <div class="mb-3 rounded-lg bg-zinc-50 border border-zinc-200/80 overflow-hidden text-xs">
+                <!-- 默认单行紧凑栏目 -->
+                <div class="px-3 py-1.5 flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-1.5 text-zinc-600 truncate min-w-0">
+                    <span class="w-1.5 h-1.5 rounded-full bg-brand-600 shrink-0"></span>
+                    <span class="font-medium text-zinc-800 shrink-0">电商智能售后 Agent 演示</span>
+                    <span class="text-zinc-300 shrink-0">·</span>
+                    <span class="font-mono text-zinc-500 truncate">FastAPI + DeepSeek + BM25 + SQLite</span>
+                    <span class="text-zinc-300 hidden sm:inline shrink-0">·</span>
+                    <span class="text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/60 hidden sm:inline shrink-0 font-medium text-[11px]">模拟测试数据</span>
+                  </div>
+                  <button
+                    id="toggleIntroBtn"
+                    type="button"
+                    class="shrink-0 text-brand-700 hover:text-brand-800 text-[11px] font-medium inline-flex items-center gap-1 transition-colors px-1 py-0.5 rounded hover:bg-brand-50"
+                  >
+                    <span id="toggleIntroText">展开详情</span>
+                    <svg id="toggleIntroIcon" class="w-3 h-3 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="6 9 12 15 18 9"></polyline>
+                    </svg>
+                  </button>
+                </div>
+                <!-- 展开后的完整详情（默认隐藏） -->
+                <div id="introDetailBox" class="hidden px-3 py-2 border-t border-zinc-200/60 bg-zinc-100/50 space-y-1 text-[11px] sm:text-xs text-zinc-600 leading-relaxed">
+                  <div><strong class="text-zinc-700">系统定位：</strong>基于大模型函数调用（Function Calling）与本地 RAG 知识库构建的电商智能售后 Agent 演示系统。</div>
+                  <div><strong class="text-zinc-700">核心架构：</strong>FastAPI + DeepSeek 大模型 + BM25 规则知识库检索 + SQLite 原生轻量存储。</div>
+                  <div class="text-amber-800"><strong class="text-amber-900">数据声明：</strong>当前系统包含 500 条模拟电商订单与预置工单，均为测试演示数据，请放心体验各边界流程。</div>
+                </div>
+              </div>
+
+              <div class="flex items-start gap-3">
+                <div class="w-8 h-8 rounded-lg bg-brand-50 border border-brand-200 text-brand-700 flex items-center justify-center shrink-0 mt-0.5">
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
                     <path d="M2 17l10 5 10-5"></path>
                     <path d="M2 12l10 5 10-5"></path>
                   </svg>
                 </div>
                 <div>
-                  <h2 class="text-base font-semibold text-zinc-900">欢迎使用 Smart CS Agent 售后助理</h2>
-                  <p class="mt-1 text-xs sm:text-sm text-zinc-600 leading-relaxed">
-                    我可以实时查询订单物流与保修状态、检索售后退换货政策条文，并为您自动创建售后工单。右侧面板将同步展示每轮推理耗时、工具调用轨迹与工单变化。
+                  <h2 class="text-sm sm:text-[15px] font-semibold text-zinc-900">欢迎使用 Smart CS Agent 售后助理</h2>
+                  <p class="mt-0.5 text-xs text-zinc-600 leading-relaxed">
+                    我可以实时查询订单物流与保修状态、检索售后退换货政策条文，并为您自动创建售后工单。右侧面板同步展示耗时、工具轨迹与工单变化。
                   </p>
                 </div>
               </div>
 
-              <div class="mt-4 pt-3.5 border-t border-zinc-100">
+              <div class="mt-3 pt-2.5 border-t border-zinc-100">
                 <div class="text-xs font-medium text-zinc-500 mb-2 flex items-center justify-between">
                   <span>快捷测试场景（点击直接发送）</span>
-                  <span class="font-mono text-[11px] text-zinc-400">4 presets</span>
+                  <span class="font-mono text-[11px] text-zinc-400">4 个预设场景 (presets)</span>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <button
@@ -369,7 +413,7 @@
                   <span class="w-1.5 h-1.5 rounded-full bg-brand-600 loading-dot"></span>
                   <span class="w-1.5 h-1.5 rounded-full bg-brand-600 loading-dot"></span>
                 </div>
-                <span class="text-xs sm:text-[13px] text-zinc-500">正在查询订单与知识库...</span>
+                <span id="loadingText" class="text-xs sm:text-[13px] text-zinc-500">AI 正在分析问题、检索规则或查询订单，请稍候...</span>
               </div>
             </div>
           </div>
@@ -402,7 +446,7 @@
           </div>
           <div class="mt-2 flex items-center justify-between text-[11px] text-zinc-400 px-0.5">
             <span>Enter 发送 · Shift + Enter 换行</span>
-            <span id="inputStatusHint">POST /api/chat</span>
+            <span id="inputStatusHint" title="核心对话交互接口">对话接口: POST /api/chat</span>
           </div>
         </div>
       </footer>
@@ -434,76 +478,127 @@
         </button>
       </div>
 
-      <div class="flex-1 flex flex-col gap-3 p-3 sm:p-3.5 min-h-0 overflow-hidden">
+      <!-- 顶部双 Tab 分段切换栏 -->
+      <div class="shrink-0 p-3 bg-white border-b border-zinc-200">
+        <div class="flex p-1 bg-zinc-100/90 rounded-lg text-xs font-medium">
+          <!-- Tab 1: 推理追踪 -->
+          <button
+            id="tabTraceBtn"
+            type="button"
+            class="flex-1 py-1.5 px-3 rounded-md text-zinc-900 bg-white shadow-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
+          >
+            <svg class="w-3.5 h-3.5 text-brand-700 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+            <span class="whitespace-nowrap">推理追踪</span>
+          </button>
 
-        <!-- 上方卡片：Agent 本轮推理追踪 -->
-        <section class="shrink-0 bg-white border border-zinc-200 rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.03)] overflow-hidden">
-          <div class="px-3.5 py-2 border-b border-zinc-100 flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <svg class="w-4 h-4 text-brand-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-              </svg>
-              <h2 class="text-[13px] font-semibold text-zinc-900">Agent 本轮推理追踪</h2>
+          <!-- Tab 2: 售后工单 -->
+          <button
+            id="tabTicketsBtn"
+            type="button"
+            class="flex-1 py-1.5 px-3 rounded-md text-zinc-600 hover:text-zinc-900 flex items-center justify-center gap-1.5 transition-all relative"
+          >
+            <svg class="w-3.5 h-3.5 text-zinc-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+            </svg>
+            <span class="whitespace-nowrap">售后工单</span>
+            <span id="tabTicketsCountBadge" class="inline-flex items-center justify-center min-w-[18px] h-4 px-1 rounded-full text-[10px] font-mono font-medium bg-zinc-200 text-zinc-700">0</span>
+            <!-- 未读新工单醒目提示徽章 (+1) -->
+            <span id="tabTicketsUnreadBadge" class="hidden inline-flex items-center justify-center px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold bg-emerald-600 text-white animate-pulse shadow-xs">+1</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 视图 1：Agent 本轮推理追踪（全高独占，默认显示） -->
+      <div id="viewTrace" class="flex-1 flex flex-col min-h-0 bg-white">
+        <div class="shrink-0 px-4 py-2.5 border-b border-zinc-100 flex items-center justify-between">
+          <div class="flex items-center gap-1.5">
+            <span class="text-xs font-semibold text-zinc-800">本轮推理可观测性</span>
+            <span class="text-[11px] text-zinc-400">Function Calling</span>
+          </div>
+          <span id="traceStatusBadge" class="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-100 text-zinc-500">
+            空闲 (IDLE)
+          </span>
+        </div>
+
+        <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-3.5 sm:p-4 space-y-3">
+          <!-- 耗时指标 (latency_ms) -->
+          <div class="bg-zinc-50 border border-zinc-200/80 rounded-xl p-3" title="AI 思考与查库总耗时 (latency_ms)">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-medium text-zinc-700">响应耗时 (latency_ms)</span>
+              <div class="flex items-baseline gap-1 font-mono">
+                <span id="traceLatency" class="text-lg font-semibold text-zinc-900">--</span>
+                <span class="text-xs text-zinc-400">ms</span>
+              </div>
             </div>
-            <span id="traceStatusBadge" class="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-100 text-zinc-500">
-              IDLE
+            <div class="text-[11px] text-zinc-400 mt-0.5">AI 思考与查库总耗时</div>
+          </div>
+
+          <!-- 调用工具列表 (tools_called) -->
+          <div class="bg-white border border-zinc-200/80 rounded-xl p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+            <div class="flex items-center justify-between mb-1" title="AI 自动调用的后端业务接口 (tools_called)">
+              <span class="text-xs font-medium text-zinc-700">调用工具 (tools_called)</span>
+              <span id="traceToolsCount" class="font-mono text-[11px] text-zinc-400">0</span>
+            </div>
+            <div class="text-[11px] text-zinc-400 mb-2">AI 自动调用的后端业务接口</div>
+            <div id="traceToolsContainer" class="flex flex-wrap gap-1.5 min-h-[26px]">
+              <span class="text-xs text-zinc-400">等待发起对话...</span>
+            </div>
+          </div>
+
+          <!-- 命中知识库条文 (citations) -->
+          <div class="bg-white border border-zinc-200/80 rounded-xl p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+            <div class="flex items-center justify-between mb-1" title="回答所依据的售后规则条文 (citations)">
+              <span class="text-xs font-medium text-zinc-700">知识库引用 (citations)</span>
+              <span id="traceCitationsCount" class="font-mono text-[11px] text-zinc-400">0</span>
+            </div>
+            <div class="text-[11px] text-zinc-400 mb-2">回答所依据的售后规则条文</div>
+            <div id="traceCitationsContainer" class="space-y-1.5 max-h-64 overflow-y-auto custom-scroll">
+              <div class="text-xs text-zinc-400">暂无命中的知识库条文</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="shrink-0 px-4 py-2 border-t border-zinc-100 bg-zinc-50/70 flex items-center justify-between text-[11px] text-zinc-400">
+          <span>Agent Observability</span>
+          <span>OpenAI 兼容协议</span>
+        </div>
+      </div>
+
+      <!-- 视图 2：售后工单看板（全高独占，默认隐藏） -->
+      <div id="viewTickets" class="hidden flex-1 flex flex-col min-h-0 bg-white">
+        <!-- 顶部操作栏 -->
+        <div class="shrink-0 px-3.5 py-2.5 border-b border-zinc-100 flex items-center justify-between gap-2 bg-white">
+          <div class="flex items-center gap-1.5 min-w-0">
+            <span class="text-xs font-semibold text-zinc-800 truncate">售后工单列表</span>
+            <span id="ticketsCountBadge" class="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-mono font-medium bg-zinc-100 text-zinc-700">
+              0
             </span>
           </div>
 
-          <div class="p-3 space-y-2.5">
-            <!-- 耗时指标 -->
-            <div class="flex items-center justify-between bg-zinc-50 border border-zinc-200/80 rounded-lg px-3 py-1.5">
-              <span class="text-xs text-zinc-500">响应耗时 (latency_ms)</span>
-              <div class="flex items-baseline gap-1 font-mono">
-                <span id="traceLatency" class="text-base font-semibold text-zinc-900">--</span>
-                <span class="text-[11px] text-zinc-400">ms</span>
-              </div>
-            </div>
-
-            <!-- 调用工具列表 -->
-            <div>
-              <div class="text-xs font-medium text-zinc-500 mb-1 flex items-center justify-between">
-                <span>调用工具 (tools_called)</span>
-                <span id="traceToolsCount" class="font-mono text-[11px] text-zinc-400">0</span>
-              </div>
-              <div id="traceToolsContainer" class="flex flex-wrap gap-1.5 min-h-[22px]">
-                <span class="text-xs text-zinc-400">等待发起对话...</span>
-              </div>
-            </div>
-
-            <!-- 命中知识库条文 -->
-            <div>
-              <div class="text-xs font-medium text-zinc-500 mb-1 flex items-center justify-between">
-                <span>知识库引用 (citations)</span>
-                <span id="traceCitationsCount" class="font-mono text-[11px] text-zinc-400">0</span>
-              </div>
-              <div id="traceCitationsContainer" class="space-y-1 max-h-24 overflow-y-auto custom-scroll">
-                <div class="text-xs text-zinc-400">暂无命中的知识库条文</div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- 下方卡片：实时售后工单看板 -->
-        <section class="flex-1 min-h-0 flex flex-col bg-white border border-zinc-200 rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.03)] overflow-hidden">
-          <div class="shrink-0 px-3.5 py-2 border-b border-zinc-100 flex items-center justify-between gap-2">
-            <div class="flex items-center gap-2 min-w-0">
-              <svg class="w-4 h-4 text-brand-700 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <line x1="16" y1="13" x2="8" y2="13"></line>
-                <line x1="16" y1="17" x2="8" y2="17"></line>
+          <div class="flex items-center gap-1.5 shrink-0">
+            <button
+              id="resetTicketsBtn"
+              type="button"
+              title="清空当前杂乱工单并恢复 3 条精选演示工单"
+              class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 active:bg-zinc-100 text-[11px] font-medium text-zinc-600 hover:text-zinc-800 transition-colors whitespace-nowrap shrink-0 shadow-xs"
+            >
+              <svg id="resetTicketsIcon" class="w-3 h-3 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                <path d="M3 3v5h5"></path>
               </svg>
-              <h2 class="text-[13px] font-semibold text-zinc-900 truncate">实时售后工单看板</h2>
-              <span id="ticketsCountBadge" class="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-mono font-medium bg-zinc-100 text-zinc-700">
-                0
-              </span>
-            </div>
+              <span>重置示例</span>
+            </button>
 
             <button
               id="refreshTicketsBtn"
               type="button"
-              class="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 active:bg-zinc-100 text-[11px] font-medium text-zinc-600 transition-colors shrink-0"
+              title="重新从服务器同步工单列表"
+              class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 active:bg-zinc-100 text-[11px] font-medium text-zinc-600 hover:text-zinc-800 transition-colors whitespace-nowrap shrink-0 shadow-xs"
             >
               <svg id="refreshTicketsIcon" class="w-3 h-3 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="23 4 23 10 17 10"></polyline>
@@ -513,17 +608,18 @@
               <span>刷新</span>
             </button>
           </div>
+        </div>
 
-          <div id="ticketsListContainer" class="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 space-y-2 bg-zinc-50/40">
-            <div class="py-10 text-center text-xs text-zinc-400">正在加载工单列表...</div>
-          </div>
+        <!-- 工单列表滚动区（全高独占，可完整展现4-5张卡片） -->
+        <div id="ticketsListContainer" class="flex-1 min-h-0 overflow-y-auto custom-scroll p-3 space-y-2.5 bg-zinc-50/50">
+          <div class="py-10 text-center text-xs text-zinc-400">正在加载工单列表...</div>
+        </div>
 
-          <div class="shrink-0 px-3.5 py-1.5 border-t border-zinc-100 bg-white flex items-center justify-between text-[11px] text-zinc-400">
-            <span>GET /api/tickets</span>
-            <span id="ticketsUpdatedAt">尚未同步</span>
-          </div>
-        </section>
-
+        <!-- 底部状态栏 -->
+        <div class="shrink-0 px-4 py-2 border-t border-zinc-100 bg-white flex items-center justify-between text-[11px] text-zinc-400">
+          <span title="工单数据同步接口">工单同步: GET /api/tickets</span>
+          <span id="ticketsUpdatedAt">尚未同步</span>
+        </div>
       </div>
     </aside>
   </div>
@@ -545,7 +641,9 @@
         isComposing: false,
         knownTicketIds: new Set(),
         hasLoadedTicketsOnce: false,
-        toastTimer: null
+        toastTimer: null,
+        activeTab: 'trace', // 'trace' | 'tickets'
+        hasNewTicketUnread: false
       };
 
       // ==================== DOM 引用 ====================
@@ -559,6 +657,12 @@
         closeDrawerBtn: document.getElementById('closeDrawerBtn'),
         drawerBackdrop: document.getElementById('drawerBackdrop'),
         rightSidebar: document.getElementById('rightSidebar'),
+        tabTraceBtn: document.getElementById('tabTraceBtn'),
+        tabTicketsBtn: document.getElementById('tabTicketsBtn'),
+        tabTicketsCountBadge: document.getElementById('tabTicketsCountBadge'),
+        tabTicketsUnreadBadge: document.getElementById('tabTicketsUnreadBadge'),
+        viewTrace: document.getElementById('viewTrace'),
+        viewTickets: document.getElementById('viewTickets'),
         chatScrollArea: document.getElementById('chatScrollArea'),
         emptyState: document.getElementById('emptyState'),
         messagesList: document.getElementById('messagesList'),
@@ -574,10 +678,16 @@
         traceCitationsCount: document.getElementById('traceCitationsCount'),
         traceCitationsContainer: document.getElementById('traceCitationsContainer'),
         ticketsCountBadge: document.getElementById('ticketsCountBadge'),
+        resetTicketsBtn: document.getElementById('resetTicketsBtn'),
+        resetTicketsIcon: document.getElementById('resetTicketsIcon'),
         refreshTicketsBtn: document.getElementById('refreshTicketsBtn'),
         refreshTicketsIcon: document.getElementById('refreshTicketsIcon'),
         ticketsListContainer: document.getElementById('ticketsListContainer'),
         ticketsUpdatedAt: document.getElementById('ticketsUpdatedAt'),
+        toggleIntroBtn: document.getElementById('toggleIntroBtn'),
+        toggleIntroText: document.getElementById('toggleIntroText'),
+        toggleIntroIcon: document.getElementById('toggleIntroIcon'),
+        introDetailBox: document.getElementById('introDetailBox'),
         toast: document.getElementById('toast')
       };
 
@@ -711,7 +821,7 @@
       }
 
       function resetTracePanel() {
-        els.traceStatusBadge.textContent = 'IDLE';
+        els.traceStatusBadge.textContent = '空闲 (IDLE)';
         els.traceStatusBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-100 text-zinc-500';
         els.traceLatency.textContent = '--';
         els.traceToolsCount.textContent = '0';
@@ -729,6 +839,9 @@
         els.messagesList.innerHTML = '';
         els.emptyState.classList.remove('hidden');
         resetTracePanel();
+        state.hasNewTicketUnread = false;
+        if (els.tabTicketsUnreadBadge) els.tabTicketsUnreadBadge.classList.add('hidden');
+        switchTab('trace');
         els.messageInput.value = '';
         autoResizeTextarea();
         updateSendButtonState();
@@ -826,17 +939,22 @@
       }
 
       function renderTracePending() {
-        els.traceStatusBadge.textContent = 'RUNNING';
+        els.traceStatusBadge.textContent = '推理中 (RUNNING)';
         els.traceStatusBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-brand-50 text-brand-700 border border-brand-200';
       }
 
       function renderTraceError() {
-        els.traceStatusBadge.textContent = 'ERROR';
+        els.traceStatusBadge.textContent = '异常 (ERROR)';
         els.traceStatusBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200';
+        els.traceLatency.textContent = '--';
+        els.traceToolsCount.textContent = '0';
+        els.traceToolsContainer.innerHTML = '<span class="text-xs text-zinc-400">本轮未调用</span>';
+        els.traceCitationsCount.textContent = '0';
+        els.traceCitationsContainer.innerHTML = '<div class="text-xs text-zinc-400">本轮未执行检索</div>';
       }
 
       function renderTracePanel(data) {
-        els.traceStatusBadge.textContent = 'OK';
+        els.traceStatusBadge.textContent = '完成 (OK)';
         els.traceStatusBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200';
 
         // 响应耗时
@@ -925,31 +1043,45 @@
           id: t.ticket_id ?? t.id ?? t.ticketId ?? `TKT-${index + 1}`,
           orderId: t.order_id ?? t.orderId ?? t.order ?? '-',
           issueType: t.issue_type ?? t.issueType ?? t.type ?? t.category ?? '售后申请',
-          status: t.status ?? t.state ?? 'OPEN',
+          status: t.status ?? t.state ?? '待处理',
           reason: t.reason ?? t.description ?? t.detail ?? t.summary ?? '暂无原因描述',
           createdAt: t.created_at ?? t.createdAt ?? t.timestamp ?? ''
         };
       }
 
-      function getStatusBadge(status) {
-        const s = String(status || '').trim();
+      function getStatusBadge(rawStatus) {
+        const s = String(rawStatus || '').trim();
         const lower = s.toLowerCase();
-        if (['closed', 'resolved', 'done', 'completed', '已解决', '已完成', '已关闭', '已结单'].some(k => lower.includes(k))) {
-          return { label: s, cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' };
+
+        // 1. 待处理：琥珀/橙色 (bg-amber-50 text-amber-700 border-amber-200)
+        if (['待处理', 'pending', 'open', '未处理', '待审核'].some(k => lower === k || lower.includes(k))) {
+          return { label: s || '待处理', cls: 'bg-amber-50 text-amber-700 border-amber-200' };
         }
-        if (['rejected', 'cancelled', 'canceled', 'failed', '已取消', '已驳回'].some(k => lower.includes(k))) {
-          return { label: s, cls: 'bg-zinc-100 text-zinc-600 border-zinc-200' };
+
+        // 2. 处理中：蓝色 (bg-blue-50 text-blue-700 border-blue-200)
+        if (['处理中', 'processing', 'in_progress', 'handling', '审核中'].some(k => lower === k || lower.includes(k))) {
+          return { label: s || '处理中', cls: 'bg-blue-50 text-blue-700 border-blue-200' };
         }
-        if (['processing', 'in_progress', 'handling', '处理中', '审核中'].some(k => lower.includes(k))) {
-          return { label: s, cls: 'bg-sky-50 text-sky-700 border-sky-200' };
+
+        // 3. 已完成：绿色 (bg-emerald-50 text-emerald-700 border-emerald-200)
+        if (['已完成', 'completed', 'done', 'resolved', 'closed', '已解决', '已关闭', '已结单'].some(k => lower === k || lower.includes(k))) {
+          return { label: s || '已完成', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' };
         }
-        return { label: s || '待处理', cls: 'bg-amber-50 text-amber-800 border-amber-200' };
+
+        // 4. 已取消 / 已驳回
+        if (['已取消', '已驳回', 'cancelled', 'canceled', 'rejected', 'failed'].some(k => lower === k || lower.includes(k))) {
+          return { label: s || '已取消', cls: 'bg-zinc-100 text-zinc-600 border-zinc-200' };
+        }
+
+        // 5. 兜底分支：展示原始状态文本，中性灰底，绝不默认伪装为已完成
+        return { label: s || '未知状态', cls: 'bg-zinc-100 text-zinc-600 border-zinc-200' };
       }
 
       function renderTicketsList(rawList) {
         const list = rawList.map((item, idx) => normalizeTicketItem(item, idx));
         els.ticketsCountBadge.textContent = String(list.length);
-        els.mobileTicketBadge.textContent = String(list.length);
+        if (els.tabTicketsCountBadge) els.tabTicketsCountBadge.textContent = String(list.length);
+        if (els.mobileTicketBadge) els.mobileTicketBadge.textContent = String(list.length);
 
         if (list.length === 0) {
           els.ticketsListContainer.innerHTML = `
@@ -985,14 +1117,17 @@
 
           const s = String(ticket.status || '').trim().toLowerCase();
           let actionBtnHtml = '';
-          if (['待处理', 'open', 'pending'].some(k => s.includes(k))) {
+          const isPending = ['待处理', 'pending', 'open', '未处理', '待审核'].some(k => s === k || s.includes(k));
+          const isProcessing = ['处理中', 'processing', 'in_progress', 'handling', '审核中'].some(k => s === k || s.includes(k));
+
+          if (isPending) {
             actionBtnHtml = `
               <button
                 type="button"
-                class="ticket-action-btn inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-200 transition-colors"
+                class="ticket-action-btn inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-200 transition-colors shadow-xs"
                 data-ticket-id="${escapeHtml(ticket.id)}"
                 data-next-status="处理中"
-                title="点击流转至处理中"
+                title="点击接单并流转至「处理中」"
               >
                 <span>接单处理</span>
                 <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1000,14 +1135,14 @@
                 </svg>
               </button>
             `;
-          } else if (['处理中', 'processing', 'in_progress'].some(k => s.includes(k))) {
+          } else if (isProcessing) {
             actionBtnHtml = `
               <button
                 type="button"
-                class="ticket-action-btn inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition-colors"
+                class="ticket-action-btn inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition-colors shadow-xs"
                 data-ticket-id="${escapeHtml(ticket.id)}"
                 data-next-status="已完成"
-                title="点击标记为已完成"
+                title="点击将状态标记为「已完成」"
               >
                 <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <polyline points="20 6 9 17 4 12"></polyline>
@@ -1102,7 +1237,7 @@
         state.isLoading = loading;
         els.loadingIndicator.classList.toggle('hidden', !loading);
         els.sendBtnText.textContent = loading ? '处理中' : '发送';
-        els.inputStatusHint.textContent = loading ? '正在请求 /api/chat ...' : 'POST /api/chat';
+        els.inputStatusHint.textContent = loading ? '正在请求接口 POST /api/chat ...' : '对话接口: POST /api/chat';
         updateSendButtonState();
         if (loading) {
           scrollChatToBottom();
@@ -1172,8 +1307,25 @@
           appendAssistantMessage(normalizedData.reply, normalizedData);
           renderTracePanel(normalizedData);
 
-          // 每次对话返回自动刷新工单看板（尤其是调用建单工具后）
-          fetchTickets(false);
+          // 判定本轮是否调用了建单工具
+          const isTicketCreated = normalizedData.tools_called.some((tool) => {
+            const low = String(tool || '').toLowerCase();
+            return low.includes('create_after_sales_ticket') || (low.includes('create') && low.includes('ticket'));
+          });
+
+          // 先自动同步最新工单列表，更新 Tab 上的工单总数徽章
+          await fetchTickets(false);
+
+          if (isTicketCreated) {
+            // 保持当前停留在「推理追踪」Tab（方便演示时先看清工具调用记录），并在「售后工单」Tab 上点亮醒目的 +1 提醒
+            if (state.activeTab !== 'tickets') {
+              state.hasNewTicketUnread = true;
+              if (els.tabTicketsUnreadBadge) {
+                els.tabTicketsUnreadBadge.classList.remove('hidden');
+              }
+              showToast('售后工单创建成功！可在「售后工单」Tab 查看');
+            }
+          }
         } catch (err) {
           renderTraceError();
           if (err && err.name === 'AbortError') {
@@ -1191,6 +1343,52 @@
           clearTimeout(timeoutId);
           setLoadingState(false);
           els.messageInput.focus();
+        }
+      }
+
+      // ==================== 右侧双 Tab 切换控制 ====================
+      function highlightNewestTicket() {
+        requestAnimationFrame(() => {
+          if (!els.ticketsListContainer) return;
+          const firstCard = els.ticketsListContainer.querySelector('article');
+          if (firstCard) {
+            firstCard.classList.remove('ticket-new');
+            // 强制触发 DOM 回流重置动画
+            void firstCard.offsetWidth;
+            firstCard.classList.add('ticket-new');
+          }
+        });
+      }
+
+      function switchTab(targetTab) {
+        state.activeTab = targetTab;
+        if (targetTab === 'trace') {
+          if (els.tabTraceBtn) {
+            els.tabTraceBtn.className = 'flex-1 py-1.5 px-3 rounded-md text-zinc-900 bg-white shadow-xs font-semibold flex items-center justify-center gap-1.5 transition-all';
+          }
+          if (els.tabTicketsBtn) {
+            els.tabTicketsBtn.className = 'flex-1 py-1.5 px-3 rounded-md text-zinc-600 hover:text-zinc-900 flex items-center justify-center gap-1.5 transition-all relative';
+          }
+          if (els.viewTrace) els.viewTrace.classList.remove('hidden');
+          if (els.viewTickets) els.viewTickets.classList.add('hidden');
+        } else {
+          if (els.tabTicketsBtn) {
+            els.tabTicketsBtn.className = 'flex-1 py-1.5 px-3 rounded-md text-zinc-900 bg-white shadow-xs font-semibold flex items-center justify-center gap-1.5 transition-all relative';
+          }
+          if (els.tabTraceBtn) {
+            els.tabTraceBtn.className = 'flex-1 py-1.5 px-3 rounded-md text-zinc-600 hover:text-zinc-900 flex items-center justify-center gap-1.5 transition-all';
+          }
+          if (els.viewTickets) els.viewTickets.classList.remove('hidden');
+          if (els.viewTrace) els.viewTrace.classList.add('hidden');
+
+          // 切入售后工单 Tab：清除未读 +1 提醒，并对最新一条工单卡片高亮动效
+          if (state.hasNewTicketUnread) {
+            state.hasNewTicketUnread = false;
+            if (els.tabTicketsUnreadBadge) {
+              els.tabTicketsUnreadBadge.classList.add('hidden');
+            }
+            highlightNewestTicket();
+          }
         }
       }
 
@@ -1247,6 +1445,14 @@
           });
         });
 
+        // 右侧双 Tab 切换绑定
+        if (els.tabTraceBtn) {
+          els.tabTraceBtn.addEventListener('click', () => switchTab('trace'));
+        }
+        if (els.tabTicketsBtn) {
+          els.tabTicketsBtn.addEventListener('click', () => switchTab('tickets'));
+        }
+
         // 新建会话
         els.newSessionBtn.addEventListener('click', () => {
           startNewSession(false);
@@ -1261,6 +1467,48 @@
             showToast('当前 Session ID：' + state.sessionId);
           }
         });
+
+        // 切换系统介绍折叠
+        if (els.toggleIntroBtn && els.introDetailBox) {
+          els.toggleIntroBtn.addEventListener('click', () => {
+            const isHidden = els.introDetailBox.classList.contains('hidden');
+            if (isHidden) {
+              els.introDetailBox.classList.remove('hidden');
+              els.toggleIntroText.textContent = '收起';
+              els.toggleIntroIcon.classList.add('rotate-180');
+            } else {
+              els.introDetailBox.classList.add('hidden');
+              els.toggleIntroText.textContent = '展开详情';
+              els.toggleIntroIcon.classList.remove('rotate-180');
+            }
+          });
+        }
+
+        // 一键重置演示工单数据
+        if (els.resetTicketsBtn) {
+          els.resetTicketsBtn.addEventListener('click', async () => {
+            if (els.resetTicketsBtn.disabled) return;
+            els.resetTicketsBtn.disabled = true;
+            if (els.resetTicketsIcon) els.resetTicketsIcon.classList.add('animate-spin');
+
+            try {
+              const res = await fetch('/api/tickets/reset', {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' }
+              });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              showToast('工单看板已重置为 3 条标准演示工单');
+              state.hasNewTicketUnread = false;
+              if (els.tabTicketsUnreadBadge) els.tabTicketsUnreadBadge.classList.add('hidden');
+              await fetchTickets(false);
+            } catch (err) {
+              showToast('重置工单失败：' + (err.message || '网络异常'));
+            } finally {
+              els.resetTicketsBtn.disabled = false;
+              if (els.resetTicketsIcon) els.resetTicketsIcon.classList.remove('animate-spin');
+            }
+          });
+        }
 
         // 手动刷新工单
         els.refreshTicketsBtn.addEventListener('click', () => {
@@ -1309,7 +1557,12 @@
         });
 
         // 移动端抽屉交互
-        els.mobileDrawerBtn.addEventListener('click', openDrawer);
+        els.mobileDrawerBtn.addEventListener('click', () => {
+          if (state.hasNewTicketUnread) {
+            switchTab('tickets');
+          }
+          openDrawer();
+        });
         els.closeDrawerBtn.addEventListener('click', closeDrawer);
         els.drawerBackdrop.addEventListener('click', closeDrawer);
       }

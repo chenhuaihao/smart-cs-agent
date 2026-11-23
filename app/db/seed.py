@@ -216,5 +216,88 @@ def seed_orders() -> int:
     return new_inserted
 
 
+# ---------------------------------------------------------------------------
+# 3 条覆盖「待处理 / 处理中 / 已完成」全状态的精选演示工单
+# 结构: (ticket_id, order_id, issue_type, reason, status, summary, created_at)
+# ---------------------------------------------------------------------------
+MOCK_TICKETS: List[Tuple[str, str, str, str, str, str, str]] = [
+    (
+        "TKT20261120-DEMO01",
+        "ORD20261101",
+        "退货",
+        "耳机佩戴夹头且耳罩偏硬，申请7天无理由退货",
+        "待处理",
+        "买家反馈佩戴不适申请退货，待客服审核",
+        "2026-11-20 14:20:00",
+    ),
+    (
+        "TKT20261118-DEMO02",
+        "ORD20261112H",
+        "换货",
+        "耳机左耳出现断续杂音，处于15天质量问题换新期内",
+        "处理中",
+        "售后检测已受理，正在安排仓库寄发换新包裹",
+        "2026-11-18 10:30:00",
+    ),
+    (
+        "TKT20261115-DEMO03",
+        "ORD20261008",
+        "售后咨询",
+        "咨询4K电竞显示器DP1.4接口与固件升级方法",
+        "已完成",
+        "已向用户发送固件包下载链接与操作指引，用户已确认解决",
+        "2026-11-15 16:45:00",
+    ),
+]
+
+
+def seed_tickets() -> int:
+    """
+    幂等初始化工单演示数据：
+    若 tickets 表为空，则自动补录 3 条状态分别为「待处理、处理中、已完成」的示例工单；
+    若已有工单数据则跳过，保障已有数据不被冲掉。
+    """
+    init_db()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS cnt FROM tickets;")
+        count = cursor.fetchone()["cnt"]
+        if count > 0:
+            logger.info("tickets 表中已有 %d 条工单，跳过演示数据补录。", count)
+            return 0
+
+        insert_sql = """
+        INSERT INTO tickets (ticket_id, order_id, issue_type, reason, status, summary, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """
+        cursor.executemany(insert_sql, MOCK_TICKETS)
+        conn.commit()
+
+    logger.info("成功初始化 3 条多状态演示工单（待处理/处理中/已完成）。")
+    return len(MOCK_TICKETS)
+
+
+def reset_tickets() -> int:
+    """
+    一键重置工单表为 3 条干净的初始演示工单（清除历史测试堆积数据）。
+    """
+    init_db()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tickets;")
+        insert_sql = """
+        INSERT INTO tickets (ticket_id, order_id, issue_type, reason, status, summary, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """
+        cursor.executemany(insert_sql, MOCK_TICKETS)
+        conn.commit()
+
+    logger.info("已重置 tickets 工单表，恢复为 3 条精选演示工单。")
+    return len(MOCK_TICKETS)
+
+
 if __name__ == "__main__":
     seed_orders()
+    seed_tickets()

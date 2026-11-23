@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.db.database import init_db
-from app.db.seed import seed_orders
+from app.db.seed import seed_orders, seed_tickets
 from app.routers.orders import router as orders_router
 from app.routers.tickets import router as tickets_router
 from app.routers.chat import router as chat_router
@@ -41,7 +41,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("应用正在启动，执行数据库初始化检测..")
     init_db()
     seed_orders()
-    logger.info("数据库初始化与订单数据补录完成，系统就绪")
+    seed_tickets()
+    logger.info("数据库初始化、订单补录与演示工单就绪")
     yield
     logger.info("应用正在关闭...")
 
@@ -81,4 +82,11 @@ def health_check() -> Dict[str, str]:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run(
+        "app.main:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=True,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )

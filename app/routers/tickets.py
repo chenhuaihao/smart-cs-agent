@@ -1,9 +1,10 @@
 import datetime
 import logging
 import uuid
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, status
 from app.db.database import get_db_connection
+from app.db.seed import reset_tickets
 from app.schemas.ticket import TicketCreate, TicketResponse, TicketStatusUpdate
 
 logger = logging.getLogger(__name__)
@@ -103,10 +104,10 @@ def list_tickets(
     conditions = []
     params = []
 
-    if order_id:
+    if order_id and isinstance(order_id, str):
         conditions.append("order_id = ?")
         params.append(order_id.strip())
-    if ticket_status:
+    if ticket_status and isinstance(ticket_status, str):
         conditions.append("status = ?")
         params.append(ticket_status.strip())
 
@@ -198,4 +199,19 @@ def update_ticket_status(ticket_id: str, payload: TicketStatusUpdate) -> TicketR
 
     logger.info("工单状态流转成功：%s -> %s", clean_ticket_id, target_status)
     return TicketResponse.model_validate(dict(row))
+
+
+@router.post(
+    "/reset",
+    summary="重置演示工单数据",
+    description="一键清空工单表并恢复 3 条干净的初始演示工单（覆盖待处理、处理中、已完成三种状态）。"
+)
+def reset_demo_tickets() -> Dict[str, Any]:
+    """
+    一键重置工单测试数据接口：
+    用于演示和面试自检，清空当前累积的脏测试工单，重新写入 3 条标准状态演示单。
+    """
+    count = reset_tickets()
+    logger.info("调用 /api/tickets/reset 重置工单表，恢复 %d 条演示工单", count)
+    return {"message": "工单已重置为初始演示状态", "count": count}
 
