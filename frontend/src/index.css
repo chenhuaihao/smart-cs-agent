@@ -460,42 +460,58 @@ input[type='range'] {
   background: #fafcfd;
 }
 
+.chat-scroll-area--empty {
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .chat-bottom-spacer {
   height: 24px;
   flex-shrink: 0;
 }
 
 .empty-state {
-  max-width: 640px;
-  margin: 10px auto;
+  width: 100%;
+  max-width: 680px;
+  margin: auto;
   text-align: center;
 }
 
+.empty-state__head {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
 .empty-state__icon {
-  width: 38px;
-  height: 38px;
-  margin: 0 auto 8px;
-  border-radius: 11px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   background: var(--brand-soft);
   color: var(--brand-hover);
   border: 1px solid var(--brand-border);
   font-weight: 700;
-  font-size: 13px;
-  display: flex;
+  font-size: 12px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .empty-state h3 {
-  margin: 0 0 4px;
-  font-size: 15.5px;
+  margin: 0;
+  font-size: 15px;
 }
 
 .empty-state p {
-  margin: 0 0 14px;
-  font-size: 12.5px;
+  margin: 0 0 10px;
+  font-size: 12px;
   color: var(--text-soft);
-  line-height: 1.5;
+  line-height: 1.45;
 }
 
 .quick-prompts {
@@ -508,8 +524,8 @@ input[type='range'] {
 .quick-prompt-card {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 9px 12px;
+  gap: 2px;
+  padding: 8px 11px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 9px;

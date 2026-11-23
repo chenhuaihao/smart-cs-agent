@@ -79,8 +79,10 @@ ALL_ORDERS: List[Tuple[str, str, str, float, str, Optional[str], str]] = list(MO
 
 def seed_orders() -> int:
     """
-    幂等初始化 24 条精选标准演示订单：
-    仅当某 order_id 不存在时插入，已存在记录原样保留。
+    幂等初始化 24 条精选标准演示订单，并自动清理历史遗留的非标准旧单（如 v1.0 500 条旧底库）：
+    1. 对缺失的标准 order_id 执行 INSERT；
+    2. 剔除不在 ALL_ORDERS 清单中的历史遗留订单及其关联孤立工单，
+       保证升级旧版数据卷或分支切换后底库始终保持干净的 24 条标准订单。
     """
     init_db()
 
@@ -91,7 +93,11 @@ def seed_orders() -> int:
     ) VALUES (?, ?, ?, ?, ?, ?, ?);
     """
 
+    valid_ids = [order[0] for order in ALL_ORDERS]
+    placeholders = ",".join("?" for _ in valid_ids)
+
     new_inserted = 0
+    pruned_orders = 0
     with get_db_connection() as conn:
         cursor = conn.cursor()
         for order in ALL_ORDERS:
@@ -99,10 +105,26 @@ def seed_orders() -> int:
             if not cursor.fetchone():
                 cursor.execute(insert_sql, order)
                 new_inserted += 1
+
+        # 清理非标准遗留订单（先清理指向旧单号的孤立工单，再清理旧订单）
+        cursor.execute(
+            f"DELETE FROM tickets WHERE order_id NOT IN ({placeholders});",
+            tuple(valid_ids),
+        )
+        cursor.execute(
+            f"DELETE FROM orders WHERE order_id NOT IN ({placeholders});",
+            tuple(valid_ids),
+        )
+        pruned_orders = cursor.rowcount
         conn.commit()
 
-    if new_inserted > 0:
-        logger.info("演示订单初始化完成：本次新增写入 %d 条，标准底库共 %d 条。", new_inserted, len(ALL_ORDERS))
+    if new_inserted > 0 or pruned_orders > 0:
+        logger.info(
+            "演示订单同步完成：新增 %d 条，清理历史遗留旧单 %d 条，当前标准底库共 %d 条。",
+            new_inserted,
+            pruned_orders,
+            len(ALL_ORDERS),
+        )
     else:
         logger.info("演示订单检查完成：全部 %d 条标准订单均已就绪（幂等无新增）。", len(ALL_ORDERS))
 

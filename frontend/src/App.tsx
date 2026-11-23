@@ -174,6 +174,7 @@ export default function App() {
             <TicketBoard
               refreshSignal={ticketRefreshSignal}
               onInspectOrder={handleInspectOrder}
+              onDemoReset={() => setTicketRefreshSignal((v) => v + 1)}
             />
           ) : (
             <EvalReportView />
@@ -183,6 +184,7 @@ export default function App() {
         {drawerOpen && (
           <InspectorDrawer
             selectedOrderId={selectedOrderId}
+            refreshSignal={ticketRefreshSignal}
             onClose={() => setDrawerOpen(false)}
           />
         )}

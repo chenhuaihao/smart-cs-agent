@@ -92,10 +92,15 @@ export function ChatWorkspace({
       ].join(':')
     : '0';
 
-  // 在新增 token、tool_call、引用或弹出 ApprovalCard 时自动平滑滚动到底部
+  // 仅在存在对话消息时，于新增 token、tool_call、引用或弹出 ApprovalCard 后自动平滑滚动到底部；
+  // 空欢迎页保持顶部居中，避免首次打开页面被错误滚到底部裁切顶部内容。
   useEffect(() => {
+    const container = scrollAreaRef.current;
+    if (messages.length === 0) {
+      if (container) container.scrollTop = 0;
+      return;
+    }
     const rafId = window.requestAnimationFrame(() => {
-      const container = scrollAreaRef.current;
       if (container) {
         container.scrollTo({
           top: container.scrollHeight,
@@ -106,7 +111,7 @@ export function ChatWorkspace({
       }
     });
     return () => window.cancelAnimationFrame(rafId);
-  }, [scrollTriggerKey]);
+  }, [scrollTriggerKey, messages.length]);
 
   // 输入框紧凑自适应高度（默认单行，随输入内容微扩至最多约 4 行）
   useEffect(() => {
@@ -177,13 +182,18 @@ export function ChatWorkspace({
         </div>
       )}
 
-      <div className="chat-scroll-area" ref={scrollAreaRef}>
+      <div
+        className={`chat-scroll-area ${messages.length === 0 ? 'chat-scroll-area--empty' : ''}`}
+        ref={scrollAreaRef}
+      >
         {messages.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-state__icon">AI</div>
-            <h3>欢迎使用 Smart CS Agent v2.0 控制台</h3>
+            <div className="empty-state__head">
+              <div className="empty-state__icon">AI</div>
+              <h3>欢迎使用 Smart CS Agent v2.0 控制台</h3>
+            </div>
             <p>
-              点击下方快捷场景，体验 SSE 实时流式输出、Hybrid RAG（BM25 / 向量 / RRF 双路融合）溯源标签以及高风险建单人工确认流程。
+              点击下方快捷场景，体验 SSE 实时流式输出、Hybrid RAG（BM25 / 向量 / RRF）溯源标签与 HITL 建单确认。
             </p>
             <div className="quick-prompts">
               {QUICK_PROMPTS.map((item) => (

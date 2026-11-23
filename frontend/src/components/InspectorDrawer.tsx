@@ -16,12 +16,17 @@ import { FormattedText } from './FormattedText';
 interface InspectorDrawerProps {
   /** 从对话流或工单看板点击订单号时传入，自动触发订单精准查询 */
   selectedOrderId: string;
+  refreshSignal?: number;
   onClose?: () => void;
 }
 
 type InspectorTab = 'knowledge' | 'orders';
 
-export function InspectorDrawer({ selectedOrderId, onClose }: InspectorDrawerProps) {
+export function InspectorDrawer({
+  selectedOrderId,
+  refreshSignal = 0,
+  onClose,
+}: InspectorDrawerProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>('knowledge');
 
   // --- 订单联调状态 ---
@@ -51,7 +56,7 @@ export function InspectorDrawer({ selectedOrderId, onClose }: InspectorDrawerPro
 
   useEffect(() => {
     void loadAllOrders();
-  }, [loadAllOrders]);
+  }, [loadAllOrders, refreshSignal]);
 
   const queryOrder = useCallback(async (oid: string) => {
     const clean = oid.trim();

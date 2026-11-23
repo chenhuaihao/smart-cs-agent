@@ -15,6 +15,7 @@ interface TicketBoardProps {
   /** 外部递增版本号（如对话完成建单后触发自动刷新） */
   refreshSignal: number;
   onInspectOrder: (orderId: string) => void;
+  onDemoReset?: () => void;
 }
 
 const STATUS_OPTIONS = ['全部', '待处理', '处理中', '已完成'] as const;
@@ -35,7 +36,7 @@ function getStatusClass(status: string): string {
   return 'ticket-status';
 }
 
-export function TicketBoard({ refreshSignal, onInspectOrder }: TicketBoardProps) {
+export function TicketBoard({ refreshSignal, onInspectOrder, onDemoReset }: TicketBoardProps) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('全部');
   const [loading, setLoading] = useState<boolean>(false);
@@ -95,6 +96,7 @@ export function TicketBoard({ refreshSignal, onInspectOrder }: TicketBoardProps)
       setNeedAdminToken(false);
       setAdminToken('');
       setNotice(res.message);
+      onDemoReset?.();
       await loadTickets();
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
