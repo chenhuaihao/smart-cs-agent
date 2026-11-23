@@ -335,3 +335,179 @@ def test_persisted_chroma_index_reused_without_reembedding_when_unchanged(tmp_pa
     assert r3.vector_enabled is True
     assert provider_3.call_count == 1
     assert len(provider_3.embedded_batches[0]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 4. P4-A：Pre-RRF 门控过滤无关条文 + 24 条标准种子 + 新建工单默认待处理 + 限流/口令
+# ---------------------------------------------------------------------------
+
+class _TangentialNoiseEmbeddingProvider(BaseEmbeddingProvider):
+    """
+    模拟真实 Embedding 模型在“蓝牙耳机一边没声音”上的余弦相似度分布：
+      - 耳机单侧无声排查步骤：sim ≈ 0.90（强相关）
+      - 耳机排查无效建单指引：sim ≈ 0.82（强相关）
+      - 定制商品的质量瑕疵处理（coupon_and_custom_rules.md）：sim ≈ 0.43（蹭词边缘相关）
+      - 其他文档：正交（sim = 0.0）
+    """
+
+    name = "mock_tangential"
+    model = "mock-bge-m3-cal"
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for t in texts:
+            if "一边没声音" in t or "单侧无声排查步骤" in t:
+                v = [0.95, 0.31225, 0.0, 0.0]
+            elif "耳机排查无效建单指引" in t:
+                v = [0.85, 0.52678, 0.0, 0.0]
+            elif "定制商品的质量瑕疵处理" in t:
+                # 与 query [0.95, 0.31225, 0, 0] 的余弦相似度约 0.43（低于 0.48 且落差 > 0.12）
+                v = [0.45, 0.0, 0.89303, 0.0]
+            else:
+                v = [0.0, 0.0, 0.0, 1.0]
+            norm = math.sqrt(sum(x * x for x in v))
+            out.append([x / norm for x in v])
+        return out
+
+
+def test_pre_rrf_gate_filters_tangential_custom_rules_for_earphone_no_sound(tmp_path: Path) -> None:
+    """
+    验证 Pre-RRF 双路原生门控：
+      - 关闭门控（enable_pre_rrf_gate=False）时，边缘蹭词的 coupon_and_custom_rules.md 会蹭进 Top-3；
+      - 开启门控（默认 enable_pre_rrf_gate=True）时，只命中 troubleshooting_guide.md，彻底过滤无关条文；
+      - Hybrid 模式下即使传入 min_score=3.0 也不会误杀合法 RRF 结果。
+    """
+    provider = _TangentialNoiseEmbeddingProvider()
+    retriever = KnowledgeRetriever(
+        chroma_dir=tmp_path / "chroma_gate",
+        embedding_provider=provider,
+        enable_pre_rrf_gate=True,
+    )
+    query = "戴着一边没声音咋办"
+
+    ungated = retriever.search(query, top_k=3, min_score=0.0, enable_pre_rrf_gate=False)
+    assert any(h["source"] == "coupon_and_custom_rules.md" for h in ungated)
+
+    gated = retriever.search(query, top_k=3, min_score=3.0, enable_pre_rrf_gate=True)
+    assert len(gated) > 0
+    assert all(h["source"] == "troubleshooting_guide.md" for h in gated)
+    assert not any(h["source"] == "coupon_and_custom_rules.md" for h in gated)
+
+
+def test_clean_seed_orders_default_ticket_status_and_demo_guards(tmp_path: Path, monkeypatch) -> None:
+    """
+    验证 P4-A 演示环境加固：
+      - 种子订单精简为 24 条且全部为纯数字单号（无调试字母后缀）；
+      - 新建工单（工具层 + REST 接口）默认状态严格为「待处理」；
+      - POST /api/tickets/reset 在未配置 DEMO_ADMIN_TOKEN 时允许重置并恢复 24 单 + 3 工单，
+        配置后无正确口令返回 403、携带正确 X-Demo-Admin-Token 返回 200；
+      - /api/orders 触发只读 IP 限流返回 429。
+    """
+    import re
+    from app.agent.tools import create_after_sales_ticket
+    from app.core import limiter as limiter_mod
+
+    monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "test_p4a.db"))
+    monkeypatch.setenv("API_READ_RATE_LIMIT_PER_MINUTE", "100")
+    monkeypatch.setenv("API_WRITE_RATE_LIMIT_PER_MINUTE", "100")
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
+    limiter_mod._api_read_limiter._history.clear()
+    limiter_mod._api_write_limiter._history.clear()
+    limiter_mod._demo_reset_limiter._history.clear()
+
+    with TestClient(app) as client:
+        # 1. 验证 24 条标准订单且无字母后缀
+        orders = client.get("/api/orders").json()
+        assert len(orders) == 24
+        assert all(re.fullmatch(r"ORD\d{8}", o["order_id"]) for o in orders)
+
+        # 2. 验证工具层与 REST 层新建工单默认状态严格为「待处理」
+        tool_res = json.loads(
+            create_after_sales_ticket(
+                order_id="ORD20261121",
+                issue_type="退货",
+                reason="全新未拆封申请退货",
+                summary="7天无理由退货测试",
+            )
+        )
+        assert tool_res["success"] is True
+        assert tool_res["status"] == "待处理"
+
+        tid = tool_res["ticket_id"]
+        listed = client.get("/api/tickets", params={"order_id": "ORD20261121"}).json()
+        assert len(listed) == 1
+        assert listed[0]["ticket_id"] == tid
+        assert listed[0]["status"] == "待处理"
+
+        # 3. 严格单向状态机：待处理 → 处理中 → 已完成 合法；逆向流转返回 400
+        assert client.patch(f"/api/tickets/{tid}", json={"status": "处理中"}).status_code == 200
+        assert client.patch(f"/api/tickets/{tid}", json={"status": "待处理"}).status_code == 400
+        assert client.patch(f"/api/tickets/{tid}", json={"status": "已完成"}).status_code == 200
+        assert client.patch(f"/api/tickets/{tid}", json={"status": "处理中"}).status_code == 400
+        assert client.patch(f"/api/tickets/{tid}", json={"status": "待处理"}).status_code == 400
+
+        # 4. 未配置 DEMO_ADMIN_TOKEN 时：首次重置成功，5 分钟冷却内二次重置返回 429
+        reset_ok = client.post("/api/tickets/reset")
+        assert reset_ok.status_code == 200
+        assert reset_ok.json()["orders_count"] == 24
+        assert reset_ok.json()["count"] == 3
+        assert client.post("/api/tickets/reset").status_code == 429
+
+        # 5. 配置 DEMO_ADMIN_TOKEN 后校验口令（403 / 200）
+        monkeypatch.setenv("DEMO_ADMIN_TOKEN", "secret-demo-token")
+        assert client.post("/api/tickets/reset").status_code == 403
+        assert (
+            client.post("/api/tickets/reset", headers={"X-Demo-Admin-Token": "secret-demo-token"}).status_code
+            == 200
+        )
+
+        # 6. 验证只读业务接口 IP 限流生效
+        limiter_mod._api_read_limiter._history.clear()
+        monkeypatch.setenv("API_READ_RATE_LIMIT_PER_MINUTE", "2")
+        assert client.get("/api/orders").status_code == 200
+        assert client.get("/api/orders").status_code == 200
+        assert client.get("/api/orders").status_code == 429
+
+        # 7. 验证 GET /api/eval/summary 返回由脚本生成的结构化评测汇总
+        limiter_mod._api_read_limiter._history.clear()
+        monkeypatch.setenv("API_READ_RATE_LIMIT_PER_MINUTE", "100")
+        eval_resp = client.get("/api/eval/summary")
+        assert eval_resp.status_code == 200
+        eval_body = eval_resp.json()
+        assert len(eval_body["kpis"]) == 4
+        assert len(eval_body["rag_configs"]) == 4
+        assert len(eval_body["failure_cases"]) >= 1
+        assert eval_body["dataset"]["rag_total"] == 40
+
+
+def test_rrf_tail_pruning_and_query_embedding_lru_cache(tmp_path: Path) -> None:
+    """
+    验证 P4-B 核心优化：
+      1. 存在 hybrid 双路命中时，RRF 单路尾部裁剪会过滤低于 Top-1 0.6 倍的弱单路切片；
+      2. 相同查询二次检索命中内存 LRU 缓存（cache_hit=True），不重复调用 embed_texts，且产出分段耗时指标。
+    """
+    provider = MockSemanticEmbeddingProvider()
+    retriever = KnowledgeRetriever(
+        chroma_dir=tmp_path / "chroma_cache_tail",
+        embedding_provider=provider,
+        enable_pre_rrf_gate=True,
+    )
+    calls_after_init = provider.call_count
+
+    # 首次查询：双路确定性命中 hybrid（单侧无声排查），应裁剪弱单路尾部并记录分段耗时
+    q = "蓝牙耳机单侧无声排查步骤"
+    first_hits = retriever.search(q, top_k=3, min_score=3.0)
+    assert len(first_hits) > 0
+    assert first_hits[0]["retrieval_source"] == "hybrid"
+    assert all(h["retrieval_source"] == "hybrid" for h in first_hits)
+    assert provider.call_count == calls_after_init + 1
+    assert retriever.last_search_metrics["cache_hit"] is False
+    for key in ("bm25_ms", "embed_api_ms", "chroma_ms", "rrf_ms", "total_ms"):
+        assert key in retriever.last_search_metrics
+
+    # 二次相同查询：命中 Query Embedding LRU 缓存，embed_texts 调用次数不增加
+    second_hits = retriever.search(q, top_k=3, min_score=3.0)
+    assert second_hits == first_hits
+    assert provider.call_count == calls_after_init + 1
+    assert retriever.last_search_metrics["cache_hit"] is True
+

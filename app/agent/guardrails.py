@@ -229,7 +229,7 @@ def _parse_json_dict(raw: Any) -> dict[str, Any]:
 # 3. 规则校验器（policy_verifier 核心判断）与降级文案
 # ---------------------------------------------------------------------------
 
-# 匹配订单号（如 ORD20261101、ORD20261121A、ORD2026_FAKE_NO）与工单号（TKT20261123-ABCDEF）
+# 匹配订单号（如 ORD20261101、ORD20261121、ORD2026_FAKE_NO）与工单号（TKT20261123-ABCDEF）
 _ORDER_ID_RE = re.compile(r"\bORD[0-9A-Z_]{4,20}\b", re.IGNORECASE)
 _TICKET_ID_RE = re.compile(r"\bTKT\d{8}-[0-9A-F]{6}\b", re.IGNORECASE)
 _TRACKING_NO_RE = re.compile(r"\b(?:SF|JD|YTO|ZT)\d{8,14}\b", re.IGNORECASE)

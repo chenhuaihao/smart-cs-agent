@@ -231,38 +231,66 @@ class ChromaVectorStore:
             logger.warning("vector_store: Chroma 同步/建索引失败，自动降级为纯 BM25: %s", e)
             return False
 
-    def query(
+    def query_by_vector(
         self,
-        query_text: str,
-        provider: BaseEmbeddingProvider,
+        query_vector: list[float],
         top_k: int = 6,
-        min_similarity: float = 0.35,
+        min_similarity: float = 0.58,
+        max_drop: float | None = 0.10,
     ) -> list[tuple[str, float]]:
         """
-        执行单路向量语义检索，返回按余弦相似度降序排列的 [(chunk_id, similarity)]。
-        余弦距离 distance = 1 - cosine_similarity，过滤 similarity < min_similarity 的弱相关项。
+        使用已计算好的查询向量直接执行 Chroma 相似度检索（便于上层独立缓存向量并精确统计 chroma_ms）。
+        余弦距离 distance = 1 - cosine_similarity，Pre-RRF 双重门控：
+          1. 绝对阈值门控：过滤 similarity < min_similarity 的弱相关项；
+          2. 相对衰减门控：当 max_drop 不为 None 时，过滤与 Top-1 相似度落差超过 max_drop 的边缘蹭分项。
         """
         collection = self._ensure_collection()
         total = int(collection.count())
-        if total == 0:
-            return []
-
-        vectors = provider.embed_texts([query_text])
-        if not vectors:
+        if total == 0 or not query_vector:
             return []
 
         n_results = min(max(top_k, 1), total)
         raw = collection.query(
-            query_embeddings=[vectors[0]],
+            query_embeddings=[query_vector],
             n_results=n_results,
             include=["distances"],
         )
         ids = (raw.get("ids") or [[]])[0]
         distances = (raw.get("distances") or [[]])[0]
 
+        scored = [
+            (str(chunk_id), 1.0 - float(dist))
+            for chunk_id, dist in zip(ids, distances)
+        ]
+        scored.sort(key=lambda item: item[1], reverse=True)
+        if not scored:
+            return []
+
+        top1_sim = scored[0][1]
         hits: list[tuple[str, float]] = []
-        for chunk_id, dist in zip(ids, distances):
-            similarity = 1.0 - float(dist)
-            if similarity >= min_similarity:
-                hits.append((str(chunk_id), similarity))
+        for chunk_id, similarity in scored:
+            if similarity < min_similarity:
+                continue
+            if max_drop is not None and (top1_sim - similarity) > max_drop:
+                continue
+            hits.append((chunk_id, similarity))
         return hits
+
+    def query(
+        self,
+        query_text: str,
+        provider: BaseEmbeddingProvider,
+        top_k: int = 6,
+        min_similarity: float = 0.58,
+        max_drop: float | None = 0.10,
+    ) -> list[tuple[str, float]]:
+        """执行单路向量语义检索（在线向量化 + Chroma 查询一体化便捷封装）。"""
+        vectors = provider.embed_texts([query_text])
+        if not vectors:
+            return []
+        return self.query_by_vector(
+            query_vector=vectors[0],
+            top_k=top_k,
+            min_similarity=min_similarity,
+            max_drop=max_drop,
+        )

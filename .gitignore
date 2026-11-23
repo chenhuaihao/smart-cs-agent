@@ -234,3 +234,6 @@ __marimo__/
 chroma_data/
 data/chroma_db/
 logs/
+# v2.0 P3 前端构建依赖与产物
+frontend/node_modules/
+frontend/dist/

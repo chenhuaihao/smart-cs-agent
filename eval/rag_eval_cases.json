@@ -1,0 +1,317 @@
+[
+  {
+    "id": "F01",
+    "category": "formal",
+    "query": "7天无理由退货适用条件有哪些？",
+    "expected_sources": [
+      "return_policy.md#7天无理由退货规则 > 适用条件"
+    ]
+  },
+  {
+    "id": "F02",
+    "category": "formal",
+    "query": "耳机拆封后无质量问题可以退货吗？",
+    "expected_sources": [
+      "return_policy.md#耳机类退货规则 > 拆封耳机——无质量问题",
+      "return_policy.md#7天无理由退货规则 > 7天无理由退货排除类目"
+    ]
+  },
+  {
+    "id": "F03",
+    "category": "formal",
+    "query": "7天无理由退货的运费由谁承担？",
+    "expected_sources": [
+      "return_policy.md#7天无理由退货规则 > 7天无理由退货运费规则"
+    ]
+  },
+  {
+    "id": "F04",
+    "category": "formal",
+    "query": "签收15天内出现质量问题如何申请换新流程？",
+    "expected_sources": [
+      "return_policy.md#15天质量问题换新规则 > 换新流程",
+      "return_policy.md#15天质量问题换新规则 > 换新适用范围"
+    ]
+  },
+  {
+    "id": "F05",
+    "category": "formal",
+    "query": "电子产品官方质保期是多久？",
+    "expected_sources": [
+      "warranty_policy.md#电子产品质保期限 > 官方质保有效期"
+    ]
+  },
+  {
+    "id": "F06",
+    "category": "formal",
+    "query": "充电线、充电盒和耳塞套等配件质保期分别是多久？",
+    "expected_sources": [
+      "warranty_policy.md#电子产品质保期限 > 配件质保期"
+    ]
+  },
+  {
+    "id": "F07",
+    "category": "formal",
+    "query": "进水损坏和私自拆机属于免费保修范围吗？",
+    "expected_sources": [
+      "warranty_policy.md#免费保修界定 > 不属于免费保修的情形（人为损坏）"
+    ]
+  },
+  {
+    "id": "F08",
+    "category": "formal",
+    "query": "寄修流程的检测和维修时效大概需要多少个工作日？",
+    "expected_sources": [
+      "warranty_policy.md#寄修流程与时效 > 维修时效汇总",
+      "warranty_policy.md#寄修流程与时效 > 寄修申请步骤"
+    ]
+  },
+  {
+    "id": "F09",
+    "category": "formal",
+    "query": "标准发货时效是多久，超时未发货怎么处理？",
+    "expected_sources": [
+      "shipping_and_refund.md#发货时效 > 标准发货时效",
+      "shipping_and_refund.md#发货时效 > 超时未发货处理"
+    ]
+  },
+  {
+    "id": "F10",
+    "category": "formal",
+    "query": "快递显示已签收但未收到商品怎么申诉？",
+    "expected_sources": [
+      "shipping_and_refund.md#物流异常处理 > 已签收未收到商品"
+    ]
+  },
+  {
+    "id": "F11",
+    "category": "formal",
+    "query": "退货退款审核通过后，微信和银行卡原路退回多久到账？",
+    "expected_sources": [
+      "shipping_and_refund.md#退款审核与到账时效 > 退款原路退回说明",
+      "shipping_and_refund.md#退款审核与到账时效 > 退款处理流程"
+    ]
+  },
+  {
+    "id": "F12",
+    "category": "formal",
+    "query": "电子普通发票什么时候开具，如何申请增值税专用发票？",
+    "expected_sources": [
+      "invoice_and_price_protection.md#发票开具规则 > 电子普通发票开具时效",
+      "invoice_and_price_protection.md#发票开具规则 > 增值税专用发票申请"
+    ]
+  },
+  {
+    "id": "F13",
+    "category": "formal",
+    "query": "7天价保规则怎么核算差价，双11限时秒杀支持价保吗？",
+    "expected_sources": [
+      "invoice_and_price_protection.md#价格保护政策 > 7天价保规则",
+      "invoice_and_price_protection.md#价格保护政策 > 价保排除与大促例外条款"
+    ]
+  },
+  {
+    "id": "F14",
+    "category": "formal",
+    "query": "部分退货时跨店满减优惠券金额怎么分摊扣减？",
+    "expected_sources": [
+      "coupon_and_custom_rules.md#优惠券与满减分摊退款规则 > 部分退货金额分摊与优惠扣减规则"
+    ]
+  },
+  {
+    "id": "F15",
+    "category": "formal",
+    "query": "蓝牙耳机单侧无声和机械键盘按键连击怎么自助排查？",
+    "expected_sources": [
+      "troubleshooting_guide.md#蓝牙耳机常见故障自助排查 > 耳机单侧无声排查步骤",
+      "troubleshooting_guide.md#机械键盘常见故障自助排查 > 个别按键连击、串键或失灵排查"
+    ]
+  },
+  {
+    "id": "C01",
+    "category": "colloquial",
+    "query": "蓝牙耳机戴着一边完全没动静听不见啦咋弄？",
+    "expected_sources": [
+      "troubleshooting_guide.md#蓝牙耳机常见故障自助排查 > 耳机单侧无声排查步骤",
+      "troubleshooting_guide.md#蓝牙耳机常见故障自助排查 > 耳机排查无效建单指引"
+    ]
+  },
+  {
+    "id": "C02",
+    "category": "colloquial",
+    "query": "耳机盒子插电半天灯不亮充不进去电怎么办",
+    "expected_sources": [
+      "troubleshooting_guide.md#蓝牙耳机常见故障自助排查 > 耳机充电仓无法充电排查",
+      "troubleshooting_guide.md#蓝牙耳机常见故障自助排查 > 耳机排查无效建单指引"
+    ]
+  },
+  {
+    "id": "C03",
+    "category": "colloquial",
+    "query": "听歌老是一卡一卡的还老自己断掉怎么回事",
+    "expected_sources": [
+      "troubleshooting_guide.md#蓝牙耳机常见故障自助排查 > 蓝牙断连、卡顿与杂音排查"
+    ]
+  },
+  {
+    "id": "C04",
+    "category": "colloquial",
+    "query": "键盘按一下老是蹦出两个字怎么恢复出厂",
+    "expected_sources": [
+      "troubleshooting_guide.md#机械键盘常见故障自助排查 > 个别按键连击、串键或失灵排查"
+    ]
+  },
+  {
+    "id": "C05",
+    "category": "colloquial",
+    "query": "无线键盘彩灯突然灭了而且偶尔断流咋排查",
+    "expected_sources": [
+      "troubleshooting_guide.md#机械键盘常见故障自助排查 > RGB 灯光异常或无线断流排查"
+    ]
+  },
+  {
+    "id": "C06",
+    "category": "colloquial",
+    "query": "买了十来天突然出毛病了能直接给我换个全新的吗",
+    "expected_sources": [
+      "return_policy.md#15天质量问题换新规则 > 换新适用范围",
+      "return_policy.md#15天质量问题换新规则 > 换新流程",
+      "return_policy.md#耳机类退货规则 > 拆封耳机——存在质量瑕疵"
+    ]
+  },
+  {
+    "id": "C07",
+    "category": "colloquial",
+    "query": "刚收到才两天就降价了能把多花的钱补给我吗",
+    "expected_sources": [
+      "invoice_and_price_protection.md#价格保护政策 > 7天价保规则"
+    ]
+  },
+  {
+    "id": "C08",
+    "category": "colloquial",
+    "query": "公司报销把税号填错了能再重新开一张票吗",
+    "expected_sources": [
+      "invoice_and_price_protection.md#发票开具规则 > 发票修改与重开规则"
+    ]
+  },
+  {
+    "id": "C09",
+    "category": "colloquial",
+    "query": "快递信息卡在一周不动了是不是把货搞丢了",
+    "expected_sources": [
+      "shipping_and_refund.md#物流异常处理 > 物流长时间无更新"
+    ]
+  },
+  {
+    "id": "C10",
+    "category": "colloquial",
+    "query": "收到的纸箱子都被压烂了里面东西碎了咋办",
+    "expected_sources": [
+      "shipping_and_refund.md#物流异常处理 > 包裹破损"
+    ]
+  },
+  {
+    "id": "C11",
+    "category": "colloquial",
+    "query": "凑单买了两件退掉一件，之前满减省的钱会扣回来吗",
+    "expected_sources": [
+      "coupon_and_custom_rules.md#优惠券与满减分摊退款规则 > 部分退货金额分摊与优惠扣减规则"
+    ]
+  },
+  {
+    "id": "C12",
+    "category": "colloquial",
+    "query": "刻了我自己名字的耳机现在不想要了能退钱吗",
+    "expected_sources": [
+      "coupon_and_custom_rules.md#定制商品与特殊类目售后条款 > 镭射定制与个性化刻字商品排除条款",
+      "return_policy.md#7天无理由退货规则 > 7天无理由退货排除类目"
+    ]
+  },
+  {
+    "id": "C13",
+    "category": "colloquial",
+    "query": "电池用大半年掉电特别快续航撑不住了给免费修吗",
+    "expected_sources": [
+      "warranty_policy.md#免费保修界定 > 属于免费保修的情形"
+    ]
+  },
+  {
+    "id": "C14",
+    "category": "colloquial",
+    "query": "买了一年多过保了或者自己摔坏了还能寄回去花钱修吗",
+    "expected_sources": [
+      "warranty_policy.md#寄修流程与时效 > 质保期外付费维修",
+      "warranty_policy.md#免费保修界定 > 不属于免费保修的情形（人为损坏）"
+    ]
+  },
+  {
+    "id": "C15",
+    "category": "colloquial",
+    "query": "买满多少钱才包邮啊，想发顺丰次日达加多少钱",
+    "expected_sources": [
+      "shipping_and_refund.md#发货地址与运费说明 > 免运费门槛",
+      "shipping_and_refund.md#发货地址与运费说明 > 加急/顺丰发货"
+    ]
+  },
+  {
+    "id": "O01",
+    "category": "out_of_domain",
+    "query": "你们店有学生优惠或者教育折扣吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "O02",
+    "category": "out_of_domain",
+    "query": "明天深圳天气怎么样，需要带伞吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "O03",
+    "category": "out_of_domain",
+    "query": "请问支持花呗分期免息付款吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "O04",
+    "category": "out_of_domain",
+    "query": "上海这边有你们的线下实体门店可以去试听吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "O05",
+    "category": "out_of_domain",
+    "query": "可以发国际快递寄到美国或者日本吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "O06",
+    "category": "out_of_domain",
+    "query": "你们现在招兼职在线客服吗，简历发到哪里？",
+    "expected_sources": []
+  },
+  {
+    "id": "O07",
+    "category": "out_of_domain",
+    "query": "店里的会员积分怎么兑换成现金红包？",
+    "expected_sources": []
+  },
+  {
+    "id": "O08",
+    "category": "out_of_domain",
+    "query": "能帮我写一段 Python 快速排序算法代码吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "O09",
+    "category": "out_of_domain",
+    "query": "你们官方直播间每天晚上几点开播抽免单？",
+    "expected_sources": []
+  },
+  {
+    "id": "O10",
+    "category": "out_of_domain",
+    "query": "推荐一款五千元以内性价比高的轻薄笔记本电脑",
+    "expected_sources": []
+  }
+]

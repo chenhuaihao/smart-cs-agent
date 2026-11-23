@@ -12,16 +12,23 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.agent.knowledge import get_retriever
 from app.db.database import init_db
 from app.db.seed import seed_orders, seed_tickets
 from app.routers.orders import router as orders_router
 from app.routers.tickets import router as tickets_router
 from app.routers.chat import router as chat_router
 from app.routers.knowledge import router as knowledge_router
+from app.routers.eval_report import router as eval_report_router
 
 # 静态资源与主页路径（通过 Path(__file__) 定位，不依赖运行目录）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _INDEX_HTML = _STATIC_DIR / "index.html"
+# v2.0 P3：React + Vite 生产构建目录（存在时优先挂载，未构建时自动回退 v1.0 index.html）
+_FRONTEND_DIST_DIR = _PROJECT_ROOT / "frontend" / "dist"
+_FRONTEND_INDEX_HTML = _FRONTEND_DIST_DIR / "index.html"
+_FRONTEND_ASSETS_DIR = _FRONTEND_DIST_DIR / "assets"
 
 # 配置全局日志格式
 logging.basicConfig(
@@ -43,6 +50,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     seed_orders()
     seed_tickets()
     logger.info("数据库初始化、订单补录与演示工单就绪")
+    # 预热知识库检索单例（前置 jieba 词典加载与 Chroma 持久化索引复用，消除首次检索冷启动）
+    try:
+        get_retriever()
+    except Exception as e:
+        logger.warning("知识库检索器启动预热异常（不影响服务启动，将在首次请求时重试）: %s", e)
     yield
     logger.info("应用正在关闭...")
 
@@ -54,21 +66,29 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# 挂载订单、工单、对话、知识库检索路由
+# 挂载订单、工单、对话、知识库检索与只读评测报告路由
 app.include_router(orders_router)
 app.include_router(tickets_router)
 app.include_router(chat_router)
 app.include_router(knowledge_router)
+app.include_router(eval_report_router)
 
 # 挂载静态资源服务（供 /static/ 下静态文件直接访问）
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+# 若已执行 frontend 生产构建（npm run build），挂载 Vite 资源目录供单端口预览
+if _FRONTEND_ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_ASSETS_DIR), name="frontend-assets")
 
 
 @app.get("/", summary="前端智能售后工作台", tags=["frontend"])
 def read_index() -> FileResponse:
     """
-    提供智能售后工作台单页应用 (SPA)
+    提供智能售后工作台单页应用 (SPA)：
+    优先返回 v2.0 React 构建产物（frontend/dist/index.html），未构建时平滑回退至 v1.0 静态页。
     """
+    if _FRONTEND_INDEX_HTML.exists():
+        return FileResponse(_FRONTEND_INDEX_HTML)
     return FileResponse(_INDEX_HTML)
 
 

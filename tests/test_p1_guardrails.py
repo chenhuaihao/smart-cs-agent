@@ -254,7 +254,7 @@ def _make_ticket_provider() -> ScriptedProvider:
                         ToolCallRequest(
                             id="call_order_1",
                             name="query_order",
-                            arguments=json.dumps({"order_id": "ORD20261121A"}),
+                            arguments=json.dumps({"order_id": "ORD20261121"}),
                         )
                     ],
                 )
@@ -269,7 +269,7 @@ def _make_ticket_provider() -> ScriptedProvider:
                             name="create_after_sales_ticket",
                             arguments=json.dumps(
                                 {
-                                    "order_id": "ORD20261121A",
+                                    "order_id": "ORD20261121",
                                     "issue_type": "退货",
                                     "reason": "全新未拆封7天无理由退货",
                                     "summary": "申请7天无理由退货",
@@ -298,12 +298,12 @@ def _make_ticket_provider() -> ScriptedProvider:
 def test_hitl_stream_pause_and_approve_true_creates_ticket(client: TestClient) -> None:
     """流式模式触发建单时暂停并发出 approval_required，此时数据库未新增工单；approved=true 后落库并完成。"""
     set_llm_provider(_make_ticket_provider())
-    order_id = "ORD20261121A"
+    order_id = "ORD20261121"
     before_cnt = _count_tickets(order_id)
 
     resp = client.post(
         "/api/chat/stream",
-        json={"session_id": "s-hitl-approve", "message": "订单 ORD20261121A 全新未拆封，帮我建退货工单"},
+        json={"session_id": "s-hitl-approve", "message": "订单 ORD20261121 全新未拆封，帮我建退货工单"},
     )
     assert resp.status_code == 200
     turn_id = resp.headers["x-turn-id"]
@@ -315,7 +315,7 @@ def test_hitl_stream_pause_and_approve_true_creates_ticket(client: TestClient) -
     assert approval_data["turn_id"] == turn_id
     assert approval_data["tool"] == "create_after_sales_ticket"
     assert approval_data["args"]["order_id"] == order_id
-    assert "ORD20261121A" in approval_data["summary"]
+    assert "ORD20261121" in approval_data["summary"]
     assert _count_tickets(order_id) == before_cnt
 
     # 查询 turn 状态应为 waiting_approval
@@ -336,6 +336,13 @@ def test_hitl_stream_pause_and_approve_true_creates_ticket(client: TestClient) -
     assert "create_after_sales_ticket" in done["tools_called"]
     assert "TKT" in done["reply"]
 
+    # 明确验证新建工单在数据库与 GET /api/tickets 接口中的默认状态严格为「待处理」
+    tickets_resp = client.get("/api/tickets", params={"order_id": order_id})
+    assert tickets_resp.status_code == 200
+    created_tickets = tickets_resp.json()
+    assert len(created_tickets) == before_cnt + 1
+    assert created_tickets[0]["status"] == "待处理"
+
     # 校验整轮事件 seq 全程严格连续递增
     all_events = client.get(f"/api/chat/turns/{turn_id}/events").json()
     assert all_events["status"] == "completed"
@@ -346,12 +353,12 @@ def test_hitl_stream_pause_and_approve_true_creates_ticket(client: TestClient) -
 def test_hitl_stream_pause_and_approve_false_cancels_without_db_write(client: TestClient) -> None:
     """流式模式触发建单后调用 /approve 传入 approved=false → 不落库，告知用户已取消并正常收尾。"""
     set_llm_provider(_make_ticket_provider())
-    order_id = "ORD20261121A"
+    order_id = "ORD20261121"
     before_cnt = _count_tickets(order_id)
 
     resp = client.post(
         "/api/chat/stream",
-        json={"session_id": "s-hitl-reject", "message": "订单 ORD20261121A 帮我建退货工单"},
+        json={"session_id": "s-hitl-reject", "message": "订单 ORD20261121 帮我建退货工单"},
     )
     assert resp.status_code == 200
     turn_id = resp.headers["x-turn-id"]
@@ -377,12 +384,12 @@ def test_hitl_stream_pause_and_approve_false_cancels_without_db_write(client: Te
 def test_sync_chat_auto_approves_ticket_creation(client: TestClient) -> None:
     """旧版同步 POST /api/chat 默认 auto_approve=True，无需人工二次确认即可直接建单返回。"""
     set_llm_provider(_make_ticket_provider())
-    order_id = "ORD20261121A"
+    order_id = "ORD20261121"
     before_cnt = _count_tickets(order_id)
 
     resp = client.post(
         "/api/chat",
-        json={"session_id": "s-sync-compat", "message": "订单 ORD20261121A 全新未拆封，直接帮我建退货工单"},
+        json={"session_id": "s-sync-compat", "message": "订单 ORD20261121 全新未拆封，直接帮我建退货工单"},
     )
     assert resp.status_code == 200
     body = resp.json()

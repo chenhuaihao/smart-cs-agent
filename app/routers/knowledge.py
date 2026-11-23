@@ -8,10 +8,11 @@ app/routers/knowledge.py
 import logging
 from typing import List
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.agent.knowledge import get_retriever
+from app.core.limiter import check_api_read_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class KnowledgeSearchResponse(BaseModel):
 @router.get(
     "/search",
     response_model=KnowledgeSearchResponse,
+    dependencies=[Depends(check_api_read_rate_limit)],
     summary="检索本地知识库（调试用）",
     description=(
         "对本地 data/knowledge/*.md 中的售后规则文档执行 BM25 检索，"
@@ -61,18 +63,28 @@ class KnowledgeSearchResponse(BaseModel):
 def search_knowledge(
     q: str = Query(..., min_length=1, description="查询关键词，如'耳机拆封退货'"),
     top_k: int = Query(default=3, ge=1, le=10, description="最多返回条数，默认 3，最大 10"),
-    min_score: float = Query(default=3.0, ge=0.0, description="最低 BM25 得分过滤阈值，默认 3.0"),
+    min_score: float = Query(default=3.0, ge=0.0, description="纯 BM25 最低得分阈值，默认 3.0"),
+    enable_pre_rrf_gate: bool = Query(default=True, description="是否开启 Pre-RRF 双路原生相关性门控与尾部裁剪"),
+    rrf_min_score: float = Query(default=0.0, ge=0.0, le=1.0, description="Hybrid RRF 融合最小分数阈值（默认 0.0，推荐 0.016）"),
 ) -> KnowledgeSearchResponse:
     """
     知识库检索调试接口。
     直接调用 KnowledgeRetriever.search()，完全绕过大模型，
-    方便在 /docs 中逐条验证切块粒度、检索命中质量与阈值过滤效果。
+    方便验证切块粒度、Pre-RRF 门控开关、RRF 阈值与双路命中来源。
     """
-    logger.info("GET /api/knowledge/search q='%s' top_k=%d min_score=%.1f", q[:50], top_k, min_score)
+    logger.info(
+        "GET /api/knowledge/search q='%s' top_k=%d min_score=%.2f gate=%s rrf_min=%.4f",
+        q[:50], top_k, min_score, enable_pre_rrf_gate, rrf_min_score,
+    )
 
     retriever = get_retriever()
-    # 单例已在首次请求（或服务启动）时初始化，此处直接使用
-    raw_results = retriever.search(query=q, top_k=top_k, min_score=min_score)
+    raw_results = retriever.search(
+        query=q,
+        top_k=top_k,
+        min_score=min_score,
+        enable_pre_rrf_gate=enable_pre_rrf_gate,
+        rrf_min_score=rrf_min_score,
+    )
 
     hits = [
         KnowledgeHit(

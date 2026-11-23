@@ -1,19 +1,24 @@
 """
 app/agent/knowledge.py
 
-本地知识库 Hybrid RAG 检索模块（v2.0 P2）：
+本地知识库 Hybrid RAG 检索模块（v2.0 P4-B）：
   - 保留原有 jieba.cut_for_search + rank_bm25 (BM25Okapi) 切块、分词与关键词门控检索；
-  - 接入 Chroma 轻量本地向量持久化（data/chroma_db）与在线 Embedding 适配器；
-  - 实现 BM25 + 向量双路召回与 RRF（Reciprocal Rank Fusion，k=60）融合排序，
-    并为每条结果标注 retrieval_source（bm25 / vector / hybrid）；
-  - 优雅降级：未配置 EMBEDDING_API_KEY 或在线请求超时/失败时自动降级为纯 BM25，绝不阻塞服务。
+  - Pre-RRF 双路原生门控：
+    * BM25 路：绝对下限 BM25_MIN_SCORE（默认 3.0）+ 相对衰减 BM25_MIN_RATIO（默认 0.5）；
+    * Vector 路：绝对余弦相似度 VECTOR_MIN_SIMILARITY（默认 0.48）+ 相对落差 VECTOR_MAX_DROP（默认 0.10）；
+  - RRF 融合 + 单路尾部裁剪（RRF_SINGLE_PATH_RATIO=0.6）：当存在 hybrid 双路命中时，裁剪弱相关单路尾部；
+  - 进程级常驻单例 + 线程安全 Query Embedding LRU 缓存（maxsize=256）+ 全链路分段耗时日志。
 """
 
+from collections import OrderedDict
 import logging
+import os
 from pathlib import Path
 import re
 import string
-from typing import Literal, TypedDict
+import threading
+import time
+from typing import Any, Literal, TypedDict
 
 import jieba
 from rank_bm25 import BM25Okapi
@@ -28,15 +33,31 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
-# 知识库目录与 Chroma 持久化目录（不依赖运行目录 CWD）
 _KNOWLEDGE_DIR: Path = _PROJECT_ROOT / "data" / "knowledge"
 _CHROMA_DIR: Path = _PROJECT_ROOT / "data" / "chroma_db"
 
-# RRF 平滑常数与向量路余弦相似度最低阈值
+# RRF 平滑常数与 Pre-RRF 双路原生相关性门控默认值（基于 BAAI/bge-m3 40 题分布校准：域内最小 0.619，域外最大 0.568）
 DEFAULT_RRF_K: int = 60
-DEFAULT_VECTOR_MIN_SIMILARITY: float = 0.35
+DEFAULT_BM25_MIN_SCORE: float = 3.0
+DEFAULT_BM25_MIN_RATIO: float = 0.50
+DEFAULT_VECTOR_MIN_SIMILARITY: float = 0.58
+DEFAULT_VECTOR_MAX_DROP: float = 0.10
+DEFAULT_RRF_SINGLE_PATH_RATIO: float = 0.60
+DEFAULT_QUERY_EMBED_CACHE_SIZE: int = 256
 
-# 中文常见停用词（高频虚词与对客客套词，对语义无贡献，过滤后提升检索精度）
+
+def _read_float_env(name: str, default: float, min_val: float = 0.0) -> float:
+    """读取浮点型环境变量，未设置或非法时回退默认值。"""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = float(raw.strip())
+        return parsed if parsed >= min_val else default
+    except ValueError:
+        return default
+
+
 _STOPWORDS: set[str] = {
     "的", "了", "是", "在", "我", "您", "他", "她", "它",
     "们", "这", "那", "有", "和", "也", "就", "都", "不",
@@ -46,7 +67,6 @@ _STOPWORDS: set[str] = {
     "你们", "我们", "店", "本店", "问下", "帮我", "查下", "一下", "支持",
 }
 
-# 匹配 ## 或 ### 级标题的正则
 _HEADING_RE = re.compile(r"^(#{2,3})\s+(.+)$", re.MULTILINE)
 
 RetrievalSource = Literal["bm25", "vector", "hybrid"]
@@ -58,12 +78,12 @@ RetrievalSource = Literal["bm25", "vector", "hybrid"]
 
 class KnowledgeChunk(TypedDict):
     """单个知识库文档块结构（兼容 v1.0 字段，P2 新增 chunk_id 与 retrieval_source）。"""
-    chunk_id: str                      # 稳定唯一标识，格式 "文件名#章节名"
-    source: str                        # 来源文件名，如 "return_policy.md"
-    section: str                       # 章节标题，如 "耳机类退货规则 > 拆封耳机——无质量问题"
-    content: str                       # 该章节正文内容
-    score: float                       # 相关性得分（纯 BM25 模式为 BM25 分，Hybrid 模式为 RRF 分）
-    retrieval_source: RetrievalSource  # 命中来源：bm25 / vector / hybrid
+    chunk_id: str
+    source: str
+    section: str
+    content: str
+    score: float
+    retrieval_source: RetrievalSource
 
 
 # ---------------------------------------------------------------------------
@@ -73,9 +93,9 @@ class KnowledgeChunk(TypedDict):
 class KnowledgeRetriever:
     """
     Hybrid RAG 知识库检索器：
-      - 词法路：jieba 中文分词 + BM25Okapi + 标题相关性/覆盖度门控；
-      - 语义路：在线 Embedding API + Chroma 本地持久化向量检索（余弦相似度）；
-      - 融合层：RRF 倒数排名融合（score = sum(1 / (k + rank))），无 Key/异常自动降级纯 BM25。
+      - 词法路：jieba 中文分词 + BM25Okapi + 标题相关性/覆盖度/相对衰减门控；
+      - 语义路：在线 Embedding API（带 LRU 缓存）+ Chroma 本地持久化向量检索（余弦相似度）；
+      - 融合层：RRF 倒数排名融合 + 单路尾部裁剪，无 Key/异常自动降级纯 BM25。
     """
 
     def __init__(
@@ -85,13 +105,48 @@ class KnowledgeRetriever:
         embedding_provider: BaseEmbeddingProvider | None = None,
         *,
         enable_vector: bool = True,
+        enable_pre_rrf_gate: bool = True,
         rrf_k: int = DEFAULT_RRF_K,
-        vector_min_similarity: float = DEFAULT_VECTOR_MIN_SIMILARITY,
+        bm25_min_score: float | None = None,
+        bm25_min_ratio: float | None = None,
+        vector_min_similarity: float | None = None,
+        vector_max_drop: float | None = None,
+        rrf_single_path_ratio: float | None = None,
+        query_cache_size: int = DEFAULT_QUERY_EMBED_CACHE_SIZE,
     ) -> None:
         self._dir = knowledge_dir
         self._chroma_dir = chroma_dir
         self._rrf_k = max(rrf_k, 1)
-        self._vector_min_similarity = vector_min_similarity
+        self._enable_pre_rrf_gate = enable_pre_rrf_gate
+        self._bm25_min_score = (
+            bm25_min_score
+            if bm25_min_score is not None
+            else _read_float_env("BM25_MIN_SCORE", DEFAULT_BM25_MIN_SCORE)
+        )
+        self._bm25_min_ratio = (
+            bm25_min_ratio
+            if bm25_min_ratio is not None
+            else _read_float_env("BM25_MIN_RATIO", DEFAULT_BM25_MIN_RATIO)
+        )
+        self._vector_min_similarity = (
+            vector_min_similarity
+            if vector_min_similarity is not None
+            else _read_float_env("VECTOR_MIN_SIMILARITY", DEFAULT_VECTOR_MIN_SIMILARITY)
+        )
+        self._vector_max_drop = (
+            vector_max_drop
+            if vector_max_drop is not None
+            else _read_float_env("VECTOR_MAX_DROP", DEFAULT_VECTOR_MAX_DROP)
+        )
+        self._rrf_single_path_ratio = (
+            rrf_single_path_ratio
+            if rrf_single_path_ratio is not None
+            else _read_float_env("RRF_SINGLE_PATH_RATIO", DEFAULT_RRF_SINGLE_PATH_RATIO)
+        )
+        self._query_cache_size = max(query_cache_size, 0)
+        self._query_embed_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self._query_cache_lock = threading.Lock()
+        self.last_search_metrics: dict[str, Any] = {}
 
         self._chunks: list[KnowledgeChunk] = []
         self._chunk_by_id: dict[str, KnowledgeChunk] = {}
@@ -145,7 +200,6 @@ class KnowledgeRetriever:
 
         def _make_chunk(section: str, content: str) -> KnowledgeChunk:
             base_id = f"{source}#{section}"
-            # 防止同文件极端情况出现重名章节导致 Chroma 主键冲突
             count = seen_ids.get(base_id, 0) + 1
             seen_ids[base_id] = count
             chunk_id = base_id if count == 1 else f"{base_id}#{count}"
@@ -228,7 +282,6 @@ class KnowledgeRetriever:
             [f.name for f in md_files],
         )
 
-        # 按需初始化/复用 Chroma 向量索引；失败时记录 WARNING 并保持纯 BM25 可用
         if self._embedding_provider is not None:
             self._vector_store = ChromaVectorStore(persist_dir=self._chroma_dir)
             self._vector_ready = self._vector_store.sync_chunks(
@@ -237,11 +290,18 @@ class KnowledgeRetriever:
             )
 
     # ------------------------------------------------------------------
-    # 私有方法：BM25 检索与 RRF 融合
+    # 私有方法：BM25 检索、Query 向量缓存与 RRF 融合
     # ------------------------------------------------------------------
 
-    def _search_bm25(self, query: str, top_k: int, min_score: float) -> list[KnowledgeChunk]:
-        """保留原有 BM25 + 标题相关性/词元覆盖度门控检索逻辑不变。"""
+    def _search_bm25(
+        self,
+        query: str,
+        top_k: int,
+        min_score: float,
+        *,
+        apply_gating: bool = True,
+    ) -> list[KnowledgeChunk]:
+        """BM25 关键词检索 + 标题/覆盖度/相对衰减门控；支持关闭门控用于消融评测。"""
         if self._bm25 is None or not self._chunks:
             return []
 
@@ -257,45 +317,78 @@ class KnowledgeRetriever:
         scored_chunks: list[KnowledgeChunk] = []
         for i in range(len(self._chunks)):
             sc = float(scores[i])
-            if sc < min_score:
-                continue
-
-            doc_tokens = set(self._tokenized_corpus[i])
-            matched_tokens = query_token_set & doc_tokens
-            coverage = len(matched_tokens) / query_token_count
-            matched_in_section = query_token_set & self._section_tokens[i]
-
-            # 1. 基础命中门槛：query >= 3 个词元时，至少命中 2 个不同词元
-            if query_token_count >= 3 and len(matched_tokens) < 2:
-                continue
-            # 2. 标题相关性门控：章节标题与 query 无交集时，要求命中 >= 3 词且高分 (>= 7.0)
-            if len(matched_in_section) == 0 and (len(matched_tokens) < 3 or sc < 7.0):
-                continue
-            # 3. 中长句词元覆盖度门控：防虚假共现高分
-            if query_token_count >= 5:
-                if len(matched_tokens) < 3 and coverage < 0.35:
+            if apply_gating:
+                if sc < min_score:
                     continue
-                if len(matched_tokens) == 2 and sc < 7.0:
+
+                doc_tokens = set(self._tokenized_corpus[i])
+                matched_tokens = query_token_set & doc_tokens
+                coverage = len(matched_tokens) / query_token_count
+                matched_in_section = query_token_set & self._section_tokens[i]
+
+                if query_token_count >= 3 and len(matched_tokens) < 2:
                     continue
-            if query_token_count >= 8:
-                if len(matched_tokens) < 3 or (len(matched_tokens) < 4 and coverage < 0.30):
+                if len(matched_in_section) == 0 and (len(matched_tokens) < 3 or sc < 7.0):
+                    continue
+                if query_token_count >= 5:
+                    if len(matched_tokens) < 3 and coverage < 0.35:
+                        continue
+                    if len(matched_tokens) == 2 and sc < 7.0:
+                        continue
+                if query_token_count >= 8:
+                    if len(matched_tokens) < 3 or (len(matched_tokens) < 4 and coverage < 0.30):
+                        continue
+            else:
+                if sc <= 0.0:
                     continue
 
             scored_chunks.append({**self._chunks[i], "score": sc, "retrieval_source": "bm25"})
 
         scored_chunks.sort(key=lambda x: x["score"], reverse=True)
+        # BM25 相对衰减门控：剔除得分低于 Top-1 50% 的边缘凑数切片
+        if apply_gating and scored_chunks and self._bm25_min_ratio > 0:
+            top1_bm25 = scored_chunks[0]["score"]
+            min_allowed = top1_bm25 * self._bm25_min_ratio
+            scored_chunks = [c for c in scored_chunks if c["score"] >= min_allowed]
         return scored_chunks[:top_k]
+
+    def _embed_query_cached(self, query_text: str) -> tuple[list[float], bool]:
+        """线程安全 Query Embedding 内存 LRU 缓存（maxsize=256），高频问法毫秒级命中。"""
+        assert self._embedding_provider is not None
+        cache_key = (f"{self._embedding_provider.name}:{self._embedding_provider.model}", query_text)
+        if self._query_cache_size > 0:
+            with self._query_cache_lock:
+                cached = self._query_embed_cache.get(cache_key)
+                if cached is not None:
+                    self._query_embed_cache.move_to_end(cache_key)
+                    return cached, True
+
+        vectors = self._embedding_provider.embed_texts([query_text])
+        if not vectors:
+            return [], False
+        vec = vectors[0]
+
+        if self._query_cache_size > 0:
+            with self._query_cache_lock:
+                self._query_embed_cache[cache_key] = vec
+                self._query_embed_cache.move_to_end(cache_key)
+                while len(self._query_embed_cache) > self._query_cache_size:
+                    self._query_embed_cache.popitem(last=False)
+        return vec, False
 
     def _rrf_fuse(
         self,
         bm25_hits: list[KnowledgeChunk],
         vector_hits: list[tuple[str, float]],
         top_k: int,
+        *,
+        apply_tail_prune: bool = True,
+        rrf_min_score: float = 0.0,
     ) -> list[KnowledgeChunk]:
         """
-        Reciprocal Rank Fusion（倒数排名融合）：
-          score(d) = sum(1 / (k + rank(d)))，rank 从 1 开始计数，默认 k=60。
-        同时依据两路命中情况为每条结果打标：bm25 / vector / hybrid。
+        Reciprocal Rank Fusion（倒数排名融合，k=60）+ 单路尾部裁剪：
+          - 当存在 hybrid 双路命中切片时，剔除 RRF 分数低于 Top-1 * 0.6 的单路尾部切片；
+          - 若传入 rrf_min_score > 0，再按最低融合分数过滤。
         """
         bm25_ranks: dict[str, int] = {
             chunk["chunk_id"]: rank for rank, chunk in enumerate(bm25_hits, start=1)
@@ -337,12 +430,26 @@ class KnowledgeRetriever:
             }
             fused.append((rrf_score, best_rank, cid, merged))
 
-        # 按 RRF 分降序；同分时按单路最优名次升序、chunk_id 稳定排序
         fused.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+        # 单路尾部裁剪：存在高质量 hybrid 命中时，过滤落后显著的单路蹭分项
+        has_hybrid = any(item[3]["retrieval_source"] == "hybrid" for item in fused)
+        if apply_tail_prune and has_hybrid and fused and self._rrf_single_path_ratio > 0:
+            top1_rrf = fused[0][0]
+            tail_floor = top1_rrf * self._rrf_single_path_ratio
+            fused = [
+                item
+                for item in fused
+                if item[3]["retrieval_source"] == "hybrid" or item[0] >= tail_floor
+            ]
+
+        if rrf_min_score > 0:
+            fused = [item for item in fused if item[0] >= rrf_min_score]
+
         return [item[3] for item in fused[:top_k]]
 
     # ------------------------------------------------------------------
-    # 公共方法：混合检索入口
+    # 公共方法：混合检索入口（带分段耗时打点）
     # ------------------------------------------------------------------
 
     def search(
@@ -350,81 +457,142 @@ class KnowledgeRetriever:
         query: str,
         top_k: int = 3,
         min_score: float = 3.0,
+        *,
+        enable_pre_rrf_gate: bool | None = None,
+        rrf_min_score: float = 0.0,
     ) -> list[KnowledgeChunk]:
         """
-        对 query 执行检索，返回按相关性降序排列的命中条款列表。
-          - 在线 Embedding + Chroma 就绪时：执行 BM25 + 向量双路召回 + RRF 融合排序；
-          - 无 Key 或线上请求超时/失败时：自动平滑降级为纯 BM25 检索并打 WARNING 日志。
+        对 query 执行检索并记录各阶段分段耗时（bm25_ms / embed_api_ms / chroma_ms / rrf_ms / total_ms）。
         """
+        total_start = time.perf_counter()
         if self._bm25 is None or not self._chunks:
             logger.warning("knowledge: 索引未初始化，返回空结果")
             return []
 
-        if not query or not query.strip():
+        clean_query = query.strip() if query else ""
+        if not clean_query:
             return []
 
-        # 降级路径：未启用向量检索时，保持与 v1.0 完全一致的纯 BM25 行为
+        use_gate = self._enable_pre_rrf_gate if enable_pre_rrf_gate is None else enable_pre_rrf_gate
+
         if not self.vector_enabled:
-            results = self._search_bm25(query, top_k=top_k, min_score=min_score)
-            if not results:
-                logger.info("knowledge[bm25]: query='%s' 在阈值 min_score=%.1f 下无命中", query[:50], min_score)
-            else:
-                logger.info(
-                    "knowledge[bm25]: query='%s' 命中 %d 块，top1=%s score=%.3f",
-                    query[:50], len(results), results[0]["chunk_id"], results[0]["score"],
-                )
+            t_bm25 = time.perf_counter()
+            results = self._search_bm25(clean_query, top_k=top_k, min_score=min_score, apply_gating=use_gate)
+            bm25_ms = round((time.perf_counter() - t_bm25) * 1000, 2)
+            total_ms = round((time.perf_counter() - total_start) * 1000, 2)
+            self.last_search_metrics = {
+                "mode": "bm25",
+                "bm25_ms": bm25_ms,
+                "embed_api_ms": 0.0,
+                "chroma_ms": 0.0,
+                "rrf_ms": 0.0,
+                "total_ms": total_ms,
+                "cache_hit": False,
+            }
+            logger.info(
+                "knowledge[bm25]: query='%s' hits=%d bm25_ms=%.2f total_ms=%.2f",
+                clean_query[:50], len(results), bm25_ms, total_ms,
+            )
             return results
 
-        # Hybrid 路径：两路各自扩大候选池后进行 RRF 融合
         candidate_k = max(top_k * 2, 6)
-        bm25_hits = self._search_bm25(query, top_k=candidate_k, min_score=min_score)
+        bm25_floor = max(min_score, self._bm25_min_score) if use_gate else 0.0
 
+        t_bm25 = time.perf_counter()
+        bm25_hits = self._search_bm25(clean_query, top_k=candidate_k, min_score=bm25_floor, apply_gating=use_gate)
+        bm25_ms = round((time.perf_counter() - t_bm25) * 1000, 2)
+
+        embed_api_ms = 0.0
+        chroma_ms = 0.0
+        cache_hit = False
         try:
             assert self._vector_store is not None and self._embedding_provider is not None
-            vector_hits = self._vector_store.query(
-                query_text=query.strip(),
-                provider=self._embedding_provider,
+            t_embed = time.perf_counter()
+            query_vec, cache_hit = self._embed_query_cached(clean_query)
+            embed_api_ms = round((time.perf_counter() - t_embed) * 1000, 2)
+
+            t_chroma = time.perf_counter()
+            vector_hits = self._vector_store.query_by_vector(
+                query_vector=query_vec,
                 top_k=candidate_k,
-                min_similarity=self._vector_min_similarity,
+                min_similarity=self._vector_min_similarity if use_gate else 0.0,
+                max_drop=self._vector_max_drop if use_gate else None,
             )
+            chroma_ms = round((time.perf_counter() - t_chroma) * 1000, 2)
         except Exception as e:
             logger.warning("knowledge: 在线向量检索异常，本次请求平滑降级为纯 BM25: %s", e)
+            total_ms = round((time.perf_counter() - total_start) * 1000, 2)
+            self.last_search_metrics = {
+                "mode": "bm25_fallback",
+                "bm25_ms": bm25_ms,
+                "embed_api_ms": embed_api_ms,
+                "chroma_ms": chroma_ms,
+                "rrf_ms": 0.0,
+                "total_ms": total_ms,
+                "cache_hit": cache_hit,
+            }
             return bm25_hits[:top_k]
 
-        results = self._rrf_fuse(bm25_hits, vector_hits, top_k=top_k)
-        if not results:
-            logger.info("knowledge[hybrid]: query='%s' 双路均无命中", query[:50])
-        else:
-            logger.info(
-                "knowledge[hybrid]: query='%s' 命中 %d 块（bm25=%d, vector=%d），top1=%s [%s] score=%.6f",
-                query[:50],
-                len(results),
-                len(bm25_hits),
-                len(vector_hits),
-                results[0]["chunk_id"],
-                results[0]["retrieval_source"],
-                results[0]["score"],
-            )
+        t_rrf = time.perf_counter()
+        results = self._rrf_fuse(
+            bm25_hits,
+            vector_hits,
+            top_k=top_k,
+            apply_tail_prune=use_gate,
+            rrf_min_score=rrf_min_score,
+        )
+        rrf_ms = round((time.perf_counter() - t_rrf) * 1000, 2)
+        total_ms = round((time.perf_counter() - total_start) * 1000, 2)
+        self.last_search_metrics = {
+            "mode": "hybrid",
+            "bm25_ms": bm25_ms,
+            "embed_api_ms": embed_api_ms,
+            "chroma_ms": chroma_ms,
+            "rrf_ms": rrf_ms,
+            "total_ms": total_ms,
+            "cache_hit": cache_hit,
+        }
+
+        logger.info(
+            "knowledge[hybrid]: query='%s' hits=%d (gate=%s, bm25=%d, vec=%d) "
+            "bm25_ms=%.2f embed_api_ms=%.2f(cache=%s) chroma_ms=%.2f rrf_ms=%.2f total_ms=%.2f",
+            clean_query[:50],
+            len(results),
+            use_gate,
+            len(bm25_hits),
+            len(vector_hits),
+            bm25_ms,
+            embed_api_ms,
+            cache_hit,
+            chroma_ms,
+            rrf_ms,
+            total_ms,
+        )
         return results
 
 
 # ---------------------------------------------------------------------------
-# 模块级单例（支持单测显式注入与重置）
+# 模块级单例（进程常驻，支持单测显式注入与重置）
 # ---------------------------------------------------------------------------
 
 _retriever_instance: KnowledgeRetriever | None = None
+_retriever_lock = threading.Lock()
 
 
 def get_retriever() -> KnowledgeRetriever:
-    """获取 KnowledgeRetriever 单例（懒加载，首次调用时构建/复用索引）。"""
+    """获取 KnowledgeRetriever 进程级常驻单例（线程安全懒加载 / 启动预热）。"""
     global _retriever_instance
-    if _retriever_instance is None:
-        logger.info("knowledge: 首次初始化 KnowledgeRetriever 单例...")
-        _retriever_instance = KnowledgeRetriever()
+    if _retriever_instance is not None:
+        return _retriever_instance
+    with _retriever_lock:
+        if _retriever_instance is None:
+            logger.info("knowledge: 首次初始化 KnowledgeRetriever 单例...")
+            _retriever_instance = KnowledgeRetriever()
     return _retriever_instance
 
 
 def set_retriever(retriever: KnowledgeRetriever | None) -> None:
     """显式注入或重置 KnowledgeRetriever 单例（主要用于单元测试）。"""
     global _retriever_instance
-    _retriever_instance = retriever
+    with _retriever_lock:
+        _retriever_instance = retriever
