@@ -16,25 +16,15 @@ import {
   streamChat,
 } from '../api/client';
 import type {
-  ApprovalRequiredEventData,
   ChatEvent,
   ChatMessage,
-  CitationDetail,
-  CitationEventData,
   DoneEventData,
-  ErrorEventData,
-  StageEventData,
-  TokenEventData,
-  ToolCallEventData,
 } from '../types/chat';
-
-interface TurnRuntimeMeta {
-  messageId: string;
-  processedSeqs: Set<number>;
-  lastSeq: number;
-  terminal: boolean;
-  waitingApproval: boolean;
-}
+import {
+  type TurnRuntimeMeta,
+  createTurnRuntimeMeta,
+  reduceChatEvent,
+} from '../utils/streamReducer';
 
 interface UseChatStreamOptions {
   /** 当一轮对话完成时回调（例如检测调用了建单工具后自动刷新工单看板） */
@@ -48,47 +38,6 @@ function createSessionId(): string {
 
 function nowTimeLabel(): string {
   return new Date().toLocaleTimeString('zh-CN', { hour12: false });
-}
-
-function formatStageLabel(data: StageEventData): string {
-  switch (data.stage) {
-    case 'received':
-      return '已接收请求，准备进入推理...';
-    case 'thinking':
-      return `Agent 思考中（第 ${data.step ?? 1} 步）`;
-    case 'tool_running':
-      return `正在调用工具：${(data.tools ?? []).join('、') || '业务工具'}`;
-    case 'evidence_updated':
-      return `证据账本已更新（${data.tool ?? '工具结果'}）`;
-    case 'verifying':
-      return data.passed ? '规则护栏校验通过' : '规则校验拦截，触发安全重写...';
-    case 'fallback':
-      return `触发安全降级：${data.reason ?? '已转入安全兜底'}`;
-    default:
-      return `处理阶段：${data.stage}`;
-  }
-}
-
-function mergeCitationDetails(
-  existing: CitationDetail[],
-  incoming: CitationDetail[],
-): CitationDetail[] {
-  const merged = [...existing];
-  const seen = new Set(merged.map((d) => d.source));
-  for (const item of incoming) {
-    if (!item.source || seen.has(item.source)) continue;
-    merged.push(item);
-    seen.add(item.source);
-  }
-  return merged;
-}
-
-function mergeCitations(existing: string[], incoming: string[]): string[] {
-  const merged = [...existing];
-  for (const c of incoming) {
-    if (c && !merged.includes(c)) merged.push(c);
-  }
-  return merged;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -118,13 +67,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
   const ensureTurnMeta = useCallback((turnId: string, messageId: string): TurnRuntimeMeta => {
     let meta = turnMetaRef.current.get(turnId);
     if (!meta) {
-      meta = {
-        messageId,
-        processedSeqs: new Set<number>(),
-        lastSeq: 0,
-        terminal: false,
-        waitingApproval: false,
-      };
+      meta = createTurnRuntimeMeta(messageId);
       turnMetaRef.current.set(turnId, meta);
     }
     return meta;
@@ -132,7 +75,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
 
   /**
    * 幂等事件消费器：所有实时 SSE 事件与 after_seq 补发事件均经过此函数，
-   * 严格按 turnId + seq 去重，保证已处理过的 seq 绝不重复拼接或重复触发副作用。
+   * 先在外部原子更新 meta（兼容 React 19 StrictMode 两次调用 updater），再由纯函数 reduceChatEvent 归约消息。
    */
   const applyEvent = useCallback(
     (messageId: string, event: ChatEvent, fromReplay = false) => {
@@ -148,11 +91,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         meta.lastSeq = event.seq;
       }
 
-      setActiveTurnId(turnId);
-      setLastSeq(meta.lastSeq);
-
       let completedData: DoneEventData | null = null;
-
       if (event.type === 'approval_required') {
         meta.waitingApproval = true;
       } else if (event.type === 'done') {
@@ -164,121 +103,16 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         meta.waitingApproval = false;
       }
 
+      const snapshotLastSeq = meta.lastSeq;
+      setActiveTurnId(turnId);
+      setLastSeq(snapshotLastSeq);
+
       setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.id !== meta.messageId) return msg;
-
-          const next: ChatMessage = {
-            ...msg,
-            turnId,
-            lastSeq: meta.lastSeq,
-            replayedCount: fromReplay ? (msg.replayedCount ?? 0) + 1 : msg.replayedCount,
-          };
-
-          switch (event.type) {
-            case 'stage': {
-              const data = event.data as unknown as StageEventData;
-              next.stageCode = data.stage;
-              next.stageLabel = formatStageLabel(data);
-              if (data.evidence_ledger) {
-                next.evidenceLedger = data.evidence_ledger;
-                if (data.evidence_ledger.citation_details?.length) {
-                  next.citationDetails = mergeCitationDetails(
-                    next.citationDetails,
-                    data.evidence_ledger.citation_details,
-                  );
-                }
-              }
-              if (data.stage === 'tool_running') {
-                // 模型在发起工具调用前偶发输出中间旁白（如英文过渡语），进入工具阶段时立即清空，避免污染正式回复气泡
-                next.content = '';
-              }
-              if (data.stage === 'verifying' && data.passed === false) {
-                // 校验未通过准备重写时清空上一轮未通过草稿，避免两份回答拼在一起
-                next.content = '';
-              }
-              if (data.stage === 'fallback') {
-                next.isFallback = true;
-              }
-              return next;
-            }
-
-            case 'tool_call': {
-              const data = event.data as unknown as ToolCallEventData;
-              next.tools = [...next.tools, data];
-              return next;
-            }
-
-            case 'citation': {
-              const data = event.data as unknown as CitationEventData;
-              const freshCitations = Array.isArray(data.citations) ? data.citations : [];
-              next.citations = mergeCitations(next.citations, freshCitations);
-              const incomingDetails: CitationDetail[] =
-                Array.isArray(data.citation_details) && data.citation_details.length > 0
-                  ? data.citation_details
-                  : freshCitations.map((src) => ({
-                      source: src,
-                      retrieval_source: 'bm25',
-                      score: 0,
-                    }));
-              next.citationDetails = mergeCitationDetails(next.citationDetails, incomingDetails);
-              return next;
-            }
-
-            case 'token': {
-              const data = event.data as unknown as TokenEventData;
-              if (data.fallback) {
-                next.isFallback = true;
-                next.content = data.delta ?? '';
-              } else {
-                next.content = `${next.content}${data.delta ?? ''}`;
-              }
-              return next;
-            }
-
-            case 'approval_required': {
-              const data = event.data as unknown as ApprovalRequiredEventData;
-              next.status = 'waiting_approval';
-              next.stageCode = 'waiting_approval';
-              next.stageLabel = '等待人工授权确认建单';
-              next.content = '';
-              next.approval = { data, state: 'pending' };
-              return next;
-            }
-
-            case 'done': {
-              const data = event.data as unknown as DoneEventData;
-              next.status = 'completed';
-              next.stageCode = 'completed';
-              next.stageLabel = '回复已完成';
-              if (typeof data.reply === 'string' && data.reply.length > 0) {
-                next.content = data.reply;
-              }
-              if (Array.isArray(data.citations) && data.citations.length > 0) {
-                next.citations = mergeCitations(next.citations, data.citations);
-              }
-              next.ttftMs = data.ttft_ms;
-              next.latencyMs = data.latency_ms;
-              return next;
-            }
-
-            case 'error': {
-              const data = event.data as unknown as ErrorEventData;
-              next.status = 'failed';
-              next.stageCode = 'failed';
-              next.stageLabel = '本轮处理异常';
-              next.errorMessage = data.message || '后端返回错误事件';
-              if (!next.content) {
-                next.content = data.reply || data.message || '抱歉，处理请求时发生异常。';
-              }
-              next.latencyMs = data.latency_ms;
-              return next;
-            }
-
-            default:
-              return next;
-          }
-        }),
+        prev.map((msg) =>
+          msg.id === meta.messageId
+            ? reduceChatEvent(msg, event, snapshotLastSeq, fromReplay)
+            : msg,
+        ),
       );
 
       if (completedData) {

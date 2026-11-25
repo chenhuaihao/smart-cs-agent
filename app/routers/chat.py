@@ -19,7 +19,13 @@ from fastapi.responses import StreamingResponse
 
 from app.agent.core import approve_turn_stream, arun_agent, stream_agent
 from app.core.limiter import check_chat_rate_limit, check_daily_quota_limit
-from app.db.events import TURN_WAITING_APPROVAL, create_turn, get_events_after, get_turn
+from app.db.events import (
+    TURN_WAITING_APPROVAL,
+    create_turn,
+    get_events_after,
+    get_turn,
+    resolve_pending_approval,
+)
 from app.schemas.chat import (
     ApprovalRequest,
     ChatEvent,
@@ -168,7 +174,16 @@ async def approve_turn(turn_id: str, body: ApprovalRequest) -> StreamingResponse
             detail=f"turn_id={turn_id} 当前状态为 {turn['status']}，无需或已完成审批",
         )
 
-    events = approve_turn_stream(turn_id, body.approved)
+    # 在发送 HTTP 200 流响应头前执行 SQLite BEGIN IMMEDIATE 原子 CAS 抢占审批权，
+    # 彻底消除并发双击 TOCTOU 竞态：仅首个请求拿到 200 并建单，后续重复请求一律返回 409 Conflict。
+    pending = await asyncio.to_thread(resolve_pending_approval, turn_id, body.approved)
+    if pending is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"turn_id={turn_id} 已被其他请求审批或已超时过期，请勿重复提交",
+        )
+
+    events = approve_turn_stream(turn_id, body.approved, pending=pending)
     return StreamingResponse(
         _sse_frames(events),
         media_type="text/event-stream",

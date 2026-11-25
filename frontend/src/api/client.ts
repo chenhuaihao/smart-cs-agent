@@ -10,12 +10,12 @@
 import type {
   ChatEvent,
   EvalSummary,
-  EventType,
   KnowledgeSearchResponse,
   Order,
   Ticket,
   TurnEventsResponse,
 } from '../types/chat';
+import { feedSseChunk, parseSseBlock } from '../utils/streamReducer';
 
 export class ApiError extends Error {
   status: number;
@@ -61,47 +61,6 @@ export interface StreamHandlers {
   onEvent: (event: ChatEvent) => void;
 }
 
-/**
- * 解析单个 SSE 文本块（以空行分隔），严格读取 id / event / data。
- * 后端格式：
- *   id: 1
- *   event: stage
- *   data: {"turn_id":"...","seq":1,"type":"stage","data":{...},"created_at":"..."}
- */
-function parseSseBlock(rawBlock: string): ChatEvent | null {
-  const lines = rawBlock.split('\n');
-  let idStr = '';
-  let eventName = '';
-  const dataLines: string[] = [];
-
-  for (const rawLine of lines) {
-    const line = rawLine.trimEnd();
-    if (!line || line.startsWith(':')) continue;
-    const colonIdx = line.indexOf(':');
-    if (colonIdx === -1) continue;
-    const field = line.slice(0, colonIdx);
-    const value = line.slice(colonIdx + 1).replace(/^ /, '');
-    if (field === 'id') idStr = value;
-    else if (field === 'event') eventName = value;
-    else if (field === 'data') dataLines.push(value);
-  }
-
-  if (dataLines.length === 0) return null;
-  const payloadStr = dataLines.join('\n');
-  const parsed = JSON.parse(payloadStr) as Partial<ChatEvent>;
-
-  const seq = typeof parsed.seq === 'number' ? parsed.seq : Number.parseInt(idStr, 10);
-  if (!Number.isFinite(seq) || seq < 1) return null;
-
-  return {
-    turn_id: parsed.turn_id ?? '',
-    seq,
-    type: (parsed.type ?? eventName) as EventType,
-    data: (parsed.data ?? {}) as Record<string, unknown>,
-    created_at: parsed.created_at ?? '',
-  };
-}
-
 async function consumeSseResponse(
   resp: Response,
   handlers: StreamHandlers,
@@ -128,23 +87,15 @@ async function consumeSseResponse(
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-
-      let sepIndex = buffer.indexOf('\n\n');
-      while (sepIndex !== -1) {
-        const block = buffer.slice(0, sepIndex).trim();
-        buffer = buffer.slice(sepIndex + 2);
-        if (block) {
-          const evt = parseSseBlock(block);
-          if (evt) {
-            if (!resolvedTurnId && evt.turn_id) {
-              resolvedTurnId = evt.turn_id;
-              handlers.onTurnId?.(evt.turn_id);
-            }
-            handlers.onEvent(evt);
-          }
+      const chunkText = decoder.decode(value, { stream: true });
+      const { events, remainder } = feedSseChunk(buffer, chunkText);
+      buffer = remainder;
+      for (const evt of events) {
+        if (!resolvedTurnId && evt.turn_id) {
+          resolvedTurnId = evt.turn_id;
+          handlers.onTurnId?.(evt.turn_id);
         }
-        sepIndex = buffer.indexOf('\n\n');
+        handlers.onEvent(evt);
       }
     }
 

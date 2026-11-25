@@ -32,7 +32,36 @@ _EVAL_DIR = Path(__file__).resolve().parent
 _CASES_DIR = _EVAL_DIR / "cases"
 _PROJECT_ROOT = _EVAL_DIR.parent
 _REPORT_PATH = _EVAL_DIR / "eval_report.md"
+_SUMMARY_JSON_PATH = _EVAL_DIR / "eval_summary.json"
 _DB_PATH = _PROJECT_ROOT / "data" / "smart_cs.db"
+
+# 否定/疑问前缀：用于避免“不支持7天无理由退货”“是否支持24期免息”被静态黑名单子串误伤
+_NEGATION_PREFIXES = (
+    "不", "无法", "不能", "暂不", "并未", "未", "没有", "无权",
+    "不可", "是否", "能否", "拒绝", "禁止", "并非", "绝不", "难以",
+)
+
+
+def _is_affirmative_forbidden_hit(reply: str, kw: str) -> bool:
+    """
+    判断违规词 kw 是否在肯定语境下真实命中（v3.0 P4：消除否定句/复述问句假阴性）。
+    示例：
+      - reply="该商品不支持7天无理由退货", kw="支持7天无理由退货" -> False（紧邻否定前缀“不”）
+      - reply="关于是否支持24期免息，本店暂未收录", kw="支持24期免息" -> False（紧邻疑问前缀“是否”）
+      - reply="好的，支持7天无理由退货", kw="支持7天无理由退货" -> True（肯定命中）
+    """
+    if not kw or kw not in reply:
+        return False
+
+    start = 0
+    while True:
+        idx = reply.find(kw, start)
+        if idx == -1:
+            return False
+        prefix_window = reply[max(0, idx - 6):idx].strip()
+        if not any(prefix_window.endswith(neg) for neg in _NEGATION_PREFIXES):
+            return True
+        start = idx + len(kw)
 
 _DEFAULT_BASE_URL = os.getenv("EVAL_BASE_URL", "http://127.0.0.1:8000")
 
@@ -248,9 +277,9 @@ def _evaluate_case(case: Dict[str, Any], chat_api: str) -> Tuple[bool, List[str]
         if not any(kw in reply for kw in must_contain_any):
             reasons.append(f"回复未包含预期结论关键词之一: {must_contain_any}")
 
-    # 5. 严禁包含词命中
+    # 5. 严禁包含词命中（v3.0 P4：否定/疑问语境感知，避免“不支持/是否支持”触发静态子串假阴性）
     if must_not_contain:
-        hit_not_contain = [kw for kw in must_not_contain if kw in reply]
+        hit_not_contain = [kw for kw in must_not_contain if _is_affirmative_forbidden_hit(reply, kw)]
         if hit_not_contain:
             reasons.append(f"回复中包含了不应出现的违规词: {hit_not_contain}")
 
@@ -550,6 +579,42 @@ def main() -> None:
 
     # 7. 写入 Markdown 评测报告
     _generate_markdown_report(summary, case_results, _REPORT_PATH, base_url)
+
+    # 8. 全量 100 题评测时同步刷新 eval/eval_summary.json，确保线上 #eval 页面指标严格同源
+    if args.category is None and args.limit is None and total_count >= 100:
+        _sync_e2e_summary_json(summary)
+
+
+def _sync_e2e_summary_json(summary: Dict[str, Any]) -> None:
+    """将最新全量端到端评测指标写回 eval/eval_summary.json（保留 RAG 消融与数据集元数据）。"""
+    if not _SUMMARY_JSON_PATH.exists():
+        return
+    try:
+        data = json.loads(_SUMMARY_JSON_PATH.read_text(encoding="utf-8"))
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data["e2e_summary"] = {
+            "evaluated_at": now_str,
+            "total_cases": summary["total"],
+            "pass_rate": round(summary["pass_rate"], 1),
+            "tool_accuracy": round(summary["tool_accuracy"], 1),
+            "safety_rate": round(summary["safety_rate"], 1),
+            "avg_latency_ms": summary["avg_latency"],
+            "p95_latency_ms": summary["p95_latency"],
+        }
+        for kpi in data.get("kpis", []):
+            if kpi.get("key") == "e2e_tool_accuracy":
+                kpi["value"] = f"{summary['tool_accuracy']:.1f}%"
+                kpi["detail"] = (
+                    f"{summary['total']} 题并发通过率 {summary['pass_rate']:.1f}% · "
+                    f"防幻觉安全率 {summary['safety_rate']:.1f}%"
+                )
+        _SUMMARY_JSON_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"[同步] 已刷新 { _SUMMARY_JSON_PATH.name } 中的端到端评测汇总指标。")
+    except Exception as e:
+        print(f"[警告] 同步 eval_summary.json 失败: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

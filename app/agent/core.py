@@ -31,6 +31,11 @@ from app.agent.guardrails import (
 )
 from app.agent.memory import load_history, save_message
 from app.agent.prompts import build_system_prompt
+from app.agent.run_guard import (
+    ApprovalExpiredError,
+    await_with_active_budget,
+    get_approval_ttl_sec,
+)
 from app.agent.tools import execute_tool
 from app.db import events as event_store
 from app.llm.base import BaseLLMProvider
@@ -39,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 _FORWARD_EVENTS = {"stage", "tool_call", "citation", "token"}
 _background_tasks: set["asyncio.Task[None]"] = set()
+_active_turn_ids: set[str] = set()
 
 
 class _ApprovalWaitContext:
@@ -48,10 +54,25 @@ class _ApprovalWaitContext:
         self.queue = queue
         self.event = asyncio.Event()
         self.approved: bool = False
+        self.waiting_approval: bool = False
+        self.expired: bool = False
         self.done_event = asyncio.Event()
 
 
 _approval_waiters: dict[str, _ApprovalWaitContext] = {}
+
+
+def get_active_running_turn_ids() -> set[str]:
+    """返回当前进程内正在执行的 turn_id 集合，供 run_guard 区分正常长请求与僵尸轮次。"""
+    return set(_active_turn_ids)
+
+
+def notify_approval_expired(turn_id: str) -> None:
+    """当后台看门狗将某审批置为 expired 时，唤醒并释放内存中挂起的 waiter 协程，防内存泄漏。"""
+    wait_ctx = _approval_waiters.get(turn_id)
+    if wait_ctx is not None and wait_ctx.waiting_approval:
+        wait_ctx.expired = True
+        wait_ctx.event.set()
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -123,8 +144,11 @@ async def _run_turn(
     status, final_type, error = event_store.TURN_COMPLETED, "done", None
     cancelled = False
     turn_timeout = get_turn_timeout_sec()
+    approval_ttl = get_approval_ttl_sec()
     wait_ctx = _ApprovalWaitContext(queue)
     _approval_waiters[turn_id] = wait_ctx
+    _active_turn_ids.add(turn_id)
+    already_finalized = False
 
     async def _approval_handler(call: dict[str, Any]) -> bool:
         raw_args = call.get("arguments", "{}")
@@ -138,11 +162,21 @@ async def _run_turn(
             args,
             summary,
         )
+        # 标记进入人工等待：冻结活跃推理计时器，改由独立的 APPROVAL_TTL_SEC 守护
+        wait_ctx.waiting_approval = True
         await wait_ctx.queue.put(record)
         # 发出 approval_required 后向当前 SSE 流推送结束哨兵，使客户端立即收到事件并展示确认按钮；
-        # 后台图任务保持在 wait_ctx.event.wait() 上挂起，等 /approve 唤醒后继续走完剩余节点
+        # 后台图任务保持在 wait_ctx.event.wait() 上挂起，等 /approve 唤醒或 APPROVAL_TTL_SEC 超时回收
         await wait_ctx.queue.put(None)
-        await wait_ctx.event.wait()
+        try:
+            await asyncio.wait_for(wait_ctx.event.wait(), timeout=approval_ttl)
+        except asyncio.TimeoutError as exc:
+            wait_ctx.expired = True
+            raise ApprovalExpiredError(f"超过审批等待时限（{int(approval_ttl)}s）自动取消") from exc
+        finally:
+            wait_ctx.waiting_approval = False
+        if wait_ctx.expired:
+            raise ApprovalExpiredError("审批已被后台看门狗超时回收")
         return wait_ctx.approved
 
     try:
@@ -173,9 +207,11 @@ async def _run_turn(
             "evidence_ledger": EvidenceLedger(),
         }
 
-        final_state, tools_called, citations, ttft_ms = await asyncio.wait_for(
+        # 活跃预算控制：HITL 挂起等待人工决策期间不消耗 TURN_TIMEOUT_SEC，修复长思考被 45s 误杀的问题
+        final_state, tools_called, citations, ttft_ms = await await_with_active_budget(
             _consume_graph_events(turn_id, initial_state, config, started_at, wait_ctx),
-            timeout=turn_timeout,
+            active_timeout_sec=turn_timeout,
+            is_paused=lambda: wait_ctx.waiting_approval,
         )
 
         reply = final_state.get("final_reply")
@@ -183,6 +219,11 @@ async def _run_turn(
             reply = MAX_STEPS_FALLBACK_REPLY
         tools_called = final_state.get("tools_called", tools_called)
         citations = final_state.get("citations", citations)
+    except ApprovalExpiredError as e:
+        logger.info("HITL 审批超时自动取消 turn_id=%s reason=%s", turn_id, e)
+        await asyncio.to_thread(event_store.expire_pending_approval, turn_id, str(e))
+        already_finalized = True
+        reply = ""
     except asyncio.TimeoutError:
         logger.warning("turn 整轮超时 turn_id=%s timeout=%ss", turn_id, turn_timeout)
         reason = f"整轮对话处理超时（>{turn_timeout}s）"
@@ -213,62 +254,71 @@ async def _run_turn(
 
     latency_ms = _elapsed_ms(started_at)
     try:
-        await asyncio.to_thread(save_message, session_id, "user", user_message)
-        await asyncio.to_thread(
-            save_message,
-            session_id,
-            "assistant",
-            reply,
-            ",".join(tools_called) if tools_called else None,
-            latency_ms,
-        )
-        payload: dict[str, Any] = {
-            "reply": reply,
-            "tools_called": tools_called,
-            "citations": citations,
-            "ttft_ms": ttft_ms,
-            "latency_ms": latency_ms,
-        }
-        if final_type == "error":
-            payload["message"] = "Agent 处理请求时发生内部错误，请稍后重试。"
-        record = await asyncio.to_thread(
-            event_store.finish_turn,
-            turn_id,
-            status,
-            final_type,
-            payload,
-            reply,
-            tools_called,
-            citations,
-            ttft_ms,
-            latency_ms,
-            error,
-        )
-        await wait_ctx.queue.put(record)
+        if not already_finalized:
+            await asyncio.to_thread(save_message, session_id, "user", user_message)
+            await asyncio.to_thread(
+                save_message,
+                session_id,
+                "assistant",
+                reply,
+                ",".join(tools_called) if tools_called else None,
+                latency_ms,
+            )
+            payload: dict[str, Any] = {
+                "reply": reply,
+                "tools_called": tools_called,
+                "citations": citations,
+                "ttft_ms": ttft_ms,
+                "latency_ms": latency_ms,
+            }
+            if final_type == "error":
+                payload["message"] = "Agent 处理请求时发生内部错误，请稍后重试。"
+            record = await asyncio.to_thread(
+                event_store.finish_turn,
+                turn_id,
+                status,
+                final_type,
+                payload,
+                reply,
+                tools_called,
+                citations,
+                ttft_ms,
+                latency_ms,
+                error,
+            )
+            await wait_ctx.queue.put(record)
     except Exception:
         logger.exception("终态事件落库失败 turn_id=%s", turn_id)
     finally:
         wait_ctx.done_event.set()
         await wait_ctx.queue.put(None)
         _approval_waiters.pop(turn_id, None)
+        _active_turn_ids.discard(turn_id)
         logger.info(
-            "turn 结束 turn_id=%s status=%s tools=%s citations=%s ttft_ms=%s latency_ms=%d",
-            turn_id, status, tools_called, citations, ttft_ms, latency_ms,
+            "turn 结束 turn_id=%s status=%s expired=%s tools=%s citations=%s ttft_ms=%s latency_ms=%d",
+            turn_id, status, already_finalized, tools_called, citations, ttft_ms, latency_ms,
         )
     if cancelled:
         raise asyncio.CancelledError()
 
 
-async def approve_turn_stream(turn_id: str, approved: bool) -> AsyncIterator[dict[str, Any]]:
+async def approve_turn_stream(
+    turn_id: str,
+    approved: bool,
+    pending: dict[str, Any] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
     """
     处理高风险写操作 HITL 审批决策（POST /api/chat/turns/{turn_id}/approve）：
+      - 调用方（路由层）可提前通过 resolve_pending_approval 原子抢占审批权并传入 pending，
+        从而在发送 HTTP 200 响应头前就拦截并发双击（直接返回 HTTP 409）；
       - 优先唤醒内存中挂起的图任务，将后续 tool_call / token / done 事件以流式产出；
       - 若挂起任务不在当前进程内存（例如跨重启恢复），则直接基于 SQLite chat_approvals 记录执行/取消并收尾。
     """
     started_at = time.monotonic()
-    pending = await asyncio.to_thread(event_store.resolve_pending_approval, turn_id, approved)
     if pending is None:
-        raise ValueError(f"turn_id={turn_id} 当前不在 waiting_approval 状态或不存在待审批记录")
+        pending = await asyncio.to_thread(event_store.resolve_pending_approval, turn_id, approved)
+        if pending is None:
+            raise ValueError(f"turn_id={turn_id} 当前不在 waiting_approval 状态或不存在待审批记录")
 
     wait_ctx = _approval_waiters.get(turn_id)
     if wait_ctx is not None:

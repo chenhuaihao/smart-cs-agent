@@ -25,6 +25,7 @@ TURN_RUNNING = "running"
 TURN_WAITING_APPROVAL = "waiting_approval"
 TURN_COMPLETED = "completed"
 TURN_FAILED = "failed"
+APPROVAL_EXPIRED = "expired"
 
 # 允许追加事件的活跃状态（waiting_approval 期间也可在恢复瞬间写入后续事件）
 _ACTIVE_STATUSES = {TURN_RUNNING, TURN_WAITING_APPROVAL}
@@ -33,6 +34,18 @@ _ACTIVE_STATUSES = {TURN_RUNNING, TURN_WAITING_APPROVAL}
 def _now() -> str:
     """毫秒精度时间戳，便于排查同一 turn 内事件的先后与间隔。"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def _parse_ts(ts_str: str | None) -> datetime | None:
+    """解析 SQLite 中保存的时间戳（兼容带毫秒与不带毫秒格式），异常返回 None。"""
+    if not ts_str:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(ts_str.strip(), fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def _row_to_event(row: sqlite3.Row, turn_id: str) -> dict[str, Any]:
@@ -164,8 +177,10 @@ def save_pending_approval(
 
 def resolve_pending_approval(turn_id: str, approved: bool) -> dict[str, Any] | None:
     """
-    记录用户对高风险写操作的审批决策，并将 turn 状态切回 running 以便继续收尾。
-    返回待确认请求详情字典；若不存在处于 waiting_approval 的记录则返回 None。
+    原子 CAS 记录用户对高风险写操作的审批决策，并将 turn 状态切回 running 以便继续收尾。
+    使用 BEGIN IMMEDIATE 同时校验 chat_approvals 与 chat_turns 均处于 waiting_approval，
+    确保并发双击或已过期/已收敛的 turn 绝不会被重复审批或重复建单。
+    返回待确认请求详情字典；若状态不匹配则返回 None。
     """
     decision_status = "approved" if approved else "rejected"
     try:
@@ -174,22 +189,28 @@ def resolve_pending_approval(turn_id: str, approved: bool) -> dict[str, Any] | N
             cursor = conn.cursor()
             row = cursor.execute(
                 """
-                SELECT turn_id, tool_name, call_id, args, summary, status
-                FROM chat_approvals
-                WHERE turn_id = ?;
+                SELECT a.turn_id, a.tool_name, a.call_id, a.args, a.summary,
+                       a.status AS approval_status, t.status AS turn_status
+                FROM chat_approvals a
+                JOIN chat_turns t ON t.turn_id = a.turn_id
+                WHERE a.turn_id = ?;
                 """,
                 (turn_id,),
             ).fetchone()
-            if row is None or row["status"] != TURN_WAITING_APPROVAL:
+            if (
+                row is None
+                or row["approval_status"] != TURN_WAITING_APPROVAL
+                or row["turn_status"] != TURN_WAITING_APPROVAL
+            ):
                 conn.rollback()
                 return None
             cursor.execute(
-                "UPDATE chat_approvals SET status = ?, decided_at = ? WHERE turn_id = ?;",
-                (decision_status, _now(), turn_id),
+                "UPDATE chat_approvals SET status = ?, decided_at = ? WHERE turn_id = ? AND status = ?;",
+                (decision_status, _now(), turn_id, TURN_WAITING_APPROVAL),
             )
             cursor.execute(
-                "UPDATE chat_turns SET status = ? WHERE turn_id = ?;",
-                (TURN_RUNNING, turn_id),
+                "UPDATE chat_turns SET status = ? WHERE turn_id = ? AND status = ?;",
+                (TURN_RUNNING, turn_id, TURN_WAITING_APPROVAL),
             )
             conn.commit()
             return {
@@ -203,6 +224,165 @@ def resolve_pending_approval(turn_id: str, approved: bool) -> dict[str, Any] | N
     except sqlite3.Error:
         logger.exception("resolve_pending_approval 失败 turn_id=%s", turn_id)
         raise
+
+
+def expire_pending_approval(turn_id: str, reason: str = "审批等待超时自动取消") -> dict[str, Any] | None:
+    """
+    原子过期回收超时未审批的 HITL 请求：
+      1. 仅当 chat_approvals 与 chat_turns 均仍为 waiting_approval 时生效（防与并发 /approve 竞态）；
+      2. 将 chat_approvals.status 置为 'expired'，写入 stage(approval_expired) + done 终态事件；
+      3. 将 chat_turns.status 置为 'completed'，明确告知未创建任何工单。
+    若该 turn 已被用户审批或已结束，安全回滚并返回 None。
+    """
+    reply = "工单确认已超时自动取消（超过审批等待时限），未创建任何售后工单。如需继续办理，请重新发起申请。"
+    now_str = _now()
+    try:
+        with get_db_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            cursor = conn.cursor()
+            row = cursor.execute(
+                """
+                SELECT a.status AS approval_status, t.status AS turn_status
+                FROM chat_approvals a
+                JOIN chat_turns t ON t.turn_id = a.turn_id
+                WHERE a.turn_id = ?;
+                """,
+                (turn_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["approval_status"] != TURN_WAITING_APPROVAL
+                or row["turn_status"] != TURN_WAITING_APPROVAL
+            ):
+                conn.rollback()
+                return None
+
+            _insert_event(cursor, turn_id, "stage", {"stage": "approval_expired", "reason": reason})
+            done_payload = {
+                "reply": reply,
+                "tools_called": [],
+                "citations": [],
+                "ttft_ms": None,
+                "latency_ms": 0,
+                "expired": True,
+            }
+            record = _insert_event(cursor, turn_id, "done", done_payload)
+            cursor.execute(
+                "UPDATE chat_approvals SET status = ?, decided_at = ? WHERE turn_id = ?;",
+                (APPROVAL_EXPIRED, now_str, turn_id),
+            )
+            cursor.execute(
+                """
+                UPDATE chat_turns
+                SET status = ?, reply = ?, tools_called = ?, citations = ?,
+                    error = ?, finished_at = ?
+                WHERE turn_id = ?;
+                """,
+                (TURN_COMPLETED, reply, "[]", "[]", reason, now_str, turn_id),
+            )
+            conn.commit()
+            logger.info("expire_pending_approval 完成 turn_id=%s reason=%s", turn_id, reason)
+            return record
+    except (sqlite3.Error, ValueError):
+        logger.exception("expire_pending_approval 失败 turn_id=%s", turn_id)
+        raise
+
+
+def reap_stale_turns(
+    approval_ttl_sec: float = 300.0,
+    running_ttl_sec: float = 120.0,
+    active_turn_ids: set[str] | None = None,
+    on_startup: bool = False,
+) -> dict[str, Any]:
+    """
+    批量收敛僵尸 running 轮次与超时 waiting_approval 轮次：
+      - on_startup=True：服务启动时，任何残留在库中的 running 轮次都必为上次进程崩溃/重启遗留，直接收敛为 failed；
+      - 周期巡检时：仅收敛不在 active_turn_ids 且创建时间距今 >= running_ttl_sec 的僵尸 running 轮次；
+      - 对 waiting_approval 轮次：无论是否重启，只要审批创建时间距今 >= approval_ttl_sec，原子置为 expired。
+    """
+    now_dt = datetime.now()
+    active_set = active_turn_ids or set()
+    reaped_running = 0
+    expired_turn_ids: list[str] = []
+
+    # 1. 排查待收敛的 running 轮次
+    with get_db_connection() as conn:
+        running_rows = conn.execute(
+            "SELECT turn_id, created_at FROM chat_turns WHERE status = ?;",
+            (TURN_RUNNING,),
+        ).fetchall()
+        approval_rows = conn.execute(
+            """
+            SELECT a.turn_id, a.created_at
+            FROM chat_approvals a
+            JOIN chat_turns t ON t.turn_id = a.turn_id
+            WHERE a.status = ? AND t.status = ?;
+            """,
+            (TURN_WAITING_APPROVAL, TURN_WAITING_APPROVAL),
+        ).fetchall()
+
+    for row in running_rows:
+        tid = row["turn_id"]
+        if not on_startup:
+            if tid in active_set:
+                continue
+            created_dt = _parse_ts(row["created_at"])
+            if created_dt is not None and (now_dt - created_dt).total_seconds() < running_ttl_sec:
+                continue
+        reason = "服务重启导致运行中任务中断，已自动收敛" if on_startup else "后台任务超时未收敛，已自动回收"
+        if _reap_single_running_turn(tid, reason):
+            reaped_running += 1
+
+    # 2. 排查超时未审批的 waiting_approval 轮次
+    for row in approval_rows:
+        tid = row["turn_id"]
+        created_dt = _parse_ts(row["created_at"])
+        if created_dt is None or (now_dt - created_dt).total_seconds() >= approval_ttl_sec:
+            reason = f"超过审批等待时限（{int(approval_ttl_sec)}s）自动取消"
+            if expire_pending_approval(tid, reason=reason) is not None:
+                expired_turn_ids.append(tid)
+
+    return {
+        "reaped_running": reaped_running,
+        "expired_approvals": len(expired_turn_ids),
+        "expired_turn_ids": expired_turn_ids,
+    }
+
+
+def _reap_single_running_turn(turn_id: str, reason: str) -> bool:
+    """在 BEGIN IMMEDIATE 事务中原子收敛单条僵尸 running 轮次为 failed。"""
+    now_str = _now()
+    reply = "抱歉，该轮对话因服务重启或任务中断未能完成，请重新发送您的问题。"
+    try:
+        with get_db_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT status FROM chat_turns WHERE turn_id = ?;",
+                (turn_id,),
+            ).fetchone()
+            if row is None or row["status"] != TURN_RUNNING:
+                conn.rollback()
+                return False
+            _insert_event(
+                cursor,
+                turn_id,
+                "error",
+                {"message": reply, "reply": reply, "reason": reason, "reaped": True},
+            )
+            cursor.execute(
+                """
+                UPDATE chat_turns
+                SET status = ?, reply = ?, error = ?, finished_at = ?
+                WHERE turn_id = ?;
+                """,
+                (TURN_FAILED, reply, reason, now_str, turn_id),
+            )
+            conn.commit()
+            return True
+    except (sqlite3.Error, ValueError):
+        logger.exception("_reap_single_running_turn 失败 turn_id=%s", turn_id)
+        return False
 
 
 def get_pending_approval(turn_id: str) -> dict[str, Any] | None:
