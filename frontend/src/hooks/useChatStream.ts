@@ -189,6 +189,10 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
                   );
                 }
               }
+              if (data.stage === 'tool_running') {
+                // 模型在发起工具调用前偶发输出中间旁白（如英文过渡语），进入工具阶段时立即清空，避免污染正式回复气泡
+                next.content = '';
+              }
               if (data.stage === 'verifying' && data.passed === false) {
                 // 校验未通过准备重写时清空上一轮未通过草稿，避免两份回答拼在一起
                 next.content = '';
@@ -237,6 +241,7 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
               next.status = 'waiting_approval';
               next.stageCode = 'waiting_approval';
               next.stageLabel = '等待人工授权确认建单';
+              next.content = '';
               next.approval = { data, state: 'pending' };
               return next;
             }
