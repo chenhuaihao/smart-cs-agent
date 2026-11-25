@@ -22,6 +22,16 @@
 
 ---
 
+## 🖼️ 系统核心界面实拍
+
+| 智能对话工作台 + Hybrid RAG 联调面板 | HITL 高风险建单人工确认 + 双路融合溯源 |
+| :---: | :---: |
+| ![智能对话工作台与Hybrid RAG联调](docs/images/01_hybrid_rag_chat.jpg) | ![HITL高风险建单人工确认](docs/images/02_hitl_approval.jpg) |
+| **售后工单看板（严格单向状态机）** | **在线量化评测报告（4 组消融对比 + 失败归因）** |
+| ![售后工单看板](docs/images/03_ticket_board.jpg) | ![系统量化评测报告](docs/images/04_eval_report.jpg) |
+
+---
+
 ## 📊 核心评测结果速览（第一屏指标）
 
 > 所有指标均由 [`eval/run_rag_eval.py`](eval/run_rag_eval.py) 自动输出至 [`eval/eval_summary.json`](eval/eval_summary.json) 并由网站「[评测报告](http://8.166.124.35:8000/#eval)」标签页实时渲染，与完整报告 [`eval/rag_eval_report.md`](eval/rag_eval_report.md) 严格同源。
