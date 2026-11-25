@@ -12,7 +12,9 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.agent.core import get_active_running_turn_ids, notify_approval_expired
 from app.agent.knowledge import get_retriever
+from app.agent.run_guard import RunGuardWatchdog
 from app.db.database import init_db
 from app.db.seed import seed_orders, seed_tickets
 from app.routers.orders import router as orders_router
@@ -55,8 +57,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         get_retriever()
     except Exception as e:
         logger.warning("知识库检索器启动预热异常（不影响服务启动，将在首次请求时重试）: %s", e)
-    yield
-    logger.info("应用正在关闭...")
+
+    # v3.0 P1：启动运行态看门狗（先回收上次异常退出遗留的僵尸 running 与过期 HITL，再后台周期巡检）
+    watchdog = RunGuardWatchdog(
+        get_active_turn_ids=get_active_running_turn_ids,
+        on_approval_expired=notify_approval_expired,
+    )
+    await watchdog.start()
+    try:
+        yield
+    finally:
+        await watchdog.stop()
+        logger.info("应用正在关闭...")
 
 
 app = FastAPI(

@@ -233,6 +233,89 @@ def _parse_json_dict(raw: Any) -> dict[str, Any]:
 _ORDER_ID_RE = re.compile(r"\bORD[0-9A-Z_]{4,20}\b", re.IGNORECASE)
 _TICKET_ID_RE = re.compile(r"\bTKT\d{8}-[0-9A-F]{6}\b", re.IGNORECASE)
 _TRACKING_NO_RE = re.compile(r"\b(?:SF|JD|YTO|ZT)\d{8,14}\b", re.IGNORECASE)
+# 匹配内部知识库 Markdown 文件名（如 return_policy.md），严禁暴露给终端客户
+_INTERNAL_MD_RE = re.compile(r"[a-zA-Z0-9_/-]+\.md\b", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# 2.5 输入前置安全护栏（v3.0 P2：确定性 0ms 拦截高置信 Prompt Injection / 越权注入）
+# ---------------------------------------------------------------------------
+
+_INPUT_INJECTION_RULES: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "PROMPT_OVERRIDE",
+        re.compile(
+            r"(?:忽略|无视|忘记|推翻|覆盖)(?:之前|以上|上面|前面|所有|全部|一切|原有|的){1,10}(?:系统)?(?:规则|指令|限制|提示词|设定|要求)"
+            r"|ignore\s+(?:all\s+)?(?:previous|above|prior)\s+(?:instructions|prompts|rules)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "SYSTEM_PROMPT_EXFIL",
+        re.compile(
+            r"(?:输出|打印|泄露|告诉我|展示|复述|发给我).{0,10}(?:system\s*prompt|系统提示词|系统指令|提示词原文|内部规则原文|完整\s*prompt)"
+            r"|(?:把|将).{0,6}(?:system\s*prompt|系统提示词|系统指令|提示词原文|内部规则原文).{0,14}(?:输出|打印|泄露|展示|复述|发给我|发出来|告诉我)"
+            r"|(?:reveal|print|show|dump)\s+(?:your\s+)?(?:system\s*prompt|hidden\s+instructions)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "PRIVILEGE_SPOOFING",
+        re.compile(
+            r"(?:我是|切换到|进入|以)(?:超级)?(?:管理员|系统管理员|开发者|老板|root|admin)(?:模式|身份|权限)?.{0,16}"
+            r"(?:跳过|绕过|无视|直接|强制|批准|退款|免审|改价|建单|删除)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "SQL_INJECTION_DESTRUCTIVE",
+        re.compile(
+            r"(?:DROP\s+TABLE|DELETE\s+FROM\s+(?:orders|tickets|chat_logs|chat_turns)|UNION\s+SELECT\s+)",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
+
+def check_input_safety(user_message: str) -> tuple[str, str] | None:
+    """
+    输入前置安全检查（v3.0 P2）：
+      - 仅拦截高置信度的提示词覆盖、系统提示词窃取、管理员越权伪造与破坏性 SQL 注入；
+      - 正常用户情绪宣泄、普通售后咨询或查单诉求一律放行（零误杀）；
+      - 命中时返回 (code, reason)，否则返回 None。
+    """
+    text = (user_message or "").strip()
+    if not text:
+        return None
+    for code, pattern in _INPUT_INJECTION_RULES:
+        if pattern.search(text):
+            return code, f"检测到疑似安全越权或提示词注入指令（{code}）"
+    return None
+
+
+def build_input_blocked_reply(reason: str) -> str:
+    """输入安全前置拦截时的统一对客礼貌回复（不暴露任何内部策略或系统指令）。"""
+    _ = reason  # 原因仅记入后端日志与 stage 事件，不向潜在攻击者泄露检测细节
+    return (
+        "抱歉，我只能依据店铺公开售后规则为您提供订单查询、售后政策解答与工单登记服务，"
+        "无法执行跳过规则、修改系统设定或展示内部配置等操作。请问有哪笔订单或售后问题需要帮您处理？"
+    )
+
+
+ViolationCode = Literal[
+    "UNVERIFIED_ORDER",
+    "UNVERIFIED_TRACKING",
+    "UNVERIFIED_ORDER_STATUS",
+    "UNVERIFIED_TICKET_ID",
+    "FAKE_TICKET_CREATION",
+    "INTERNAL_PATH_LEAK",
+]
+
+
+class PolicyViolation(BaseModel):
+    """结构化规则违规项（v3.0 P2：便于日志聚合、前端可观测与自动化回归断言）。"""
+
+    code: ViolationCode = Field(..., description="违规分类码")
+    message: str = Field(..., description="面向重写提示与日志的违规详情")
 
 # 断言具体订单物流/签收状态的关键词（不含通用政策说明如"签收后7天内"）
 _ORDER_STATUS_CLAIMS = (
@@ -251,10 +334,10 @@ _TICKET_CREATION_CLAIMS = (
 _NEGATION_MARKERS = ("无法", "不能", "未", "没有", "没能", "暂不", "不可", "拒绝", "需要您确认")
 
 
-def verify_reply_against_ledger(reply: str, ledger: EvidenceLedger) -> list[str]:
+def verify_reply_structured(reply: str, ledger: EvidenceLedger) -> list[PolicyViolation]:
     """
-    对 agent_node 产出的最终回复做代码级硬校验。
-    返回违规原因列表；空列表表示校验通过。
+    对 agent_node 产出的最终回复做代码级硬校验，返回结构化 PolicyViolation 列表。
+    空列表表示校验通过。
 
     规则 1（防订单/物流幻觉）：
       a) 回复提及了具体订单号（ORD...），但 evidence_ledger.orders 中未查过该订单；
@@ -262,17 +345,22 @@ def verify_reply_against_ledger(reply: str, ledger: EvidenceLedger) -> list[str]
     规则 2（防虚假建单幻觉）：
       a) 回复声称"已成功创建工单/已为您提交退货工单"等，但 evidence_ledger.tickets 为空；
       b) 回复给出了具体工单号（TKT...），但该工单号不在 evidence_ledger.tickets 中。
+    规则 3（v3.0 P2 防内部知识库路径泄露）：
+      - 回复正文中暴露内部 `.md` 文件名（如 return_policy.md），触发重写转化为自然中文规则名。
     """
-    reasons: list[str] = []
+    violations: list[PolicyViolation] = []
     if not reply or not reply.strip():
-        return reasons
+        return violations
 
     # --- 规则 1a：提及了具体订单号，但账本未查询过 ---
     mentioned_orders = {m.upper() for m in _ORDER_ID_RE.findall(reply)}
     unchecked_orders = [oid for oid in sorted(mentioned_orders) if oid not in ledger.orders]
     if unchecked_orders:
-        reasons.append(
-            f"回复中提及了订单号 {', '.join(unchecked_orders)}，但未调用 query_order 工具核实真实订单数据。"
+        violations.append(
+            PolicyViolation(
+                code="UNVERIFIED_ORDER",
+                message=f"回复中提及了订单号 {', '.join(unchecked_orders)}，但未调用 query_order 工具核实真实订单数据。",
+            )
         )
 
     # --- 规则 1b：未查过任何有效订单，却捏造具体运单号或断言当前订单物流/签收状态 ---
@@ -283,29 +371,56 @@ def verify_reply_against_ledger(reply: str, ledger: EvidenceLedger) -> list[str]
     }
     unverified_trackings = [t for t in sorted(mentioned_trackings) if t not in known_trackings]
     if unverified_trackings:
-        reasons.append(
-            f"回复中给出了运单号 {', '.join(unverified_trackings)}，但证据账本中无此运单记录。"
+        violations.append(
+            PolicyViolation(
+                code="UNVERIFIED_TRACKING",
+                message=f"回复中给出了运单号 {', '.join(unverified_trackings)}，但证据账本中无此运单记录。",
+            )
         )
 
     if not valid_orders and _claims_concrete_order_status(reply):
-        reasons.append(
-            "证据账本中没有任何已核实的订单记录，但回复直接断言了订单的物流或签收状态。"
+        violations.append(
+            PolicyViolation(
+                code="UNVERIFIED_ORDER_STATUS",
+                message="证据账本中没有任何已核实的订单记录，但回复直接断言了订单的物流或签收状态。",
+            )
         )
 
     # --- 规则 2a/2b：声称已创建工单或给出工单号，但账本无对应工单 ---
     mentioned_tickets = {m.upper() for m in _TICKET_ID_RE.findall(reply)}
     unknown_tickets = [tid for tid in sorted(mentioned_tickets) if tid not in ledger.tickets]
     if unknown_tickets:
-        reasons.append(
-            f"回复中提及了工单号 {', '.join(unknown_tickets)}，但证据账本中未创建或查询到该工单。"
+        violations.append(
+            PolicyViolation(
+                code="UNVERIFIED_TICKET_ID",
+                message=f"回复中提及了工单号 {', '.join(unknown_tickets)}，但证据账本中未创建或查询到该工单。",
+            )
         )
 
     if not ledger.tickets and _claims_ticket_created(reply):
-        reasons.append(
-            "回复声称已创建/已提交售后工单，但证据账本中没有任何已创建的工单记录（严禁未调用 create_after_sales_ticket 就谎称建单成功）。"
+        violations.append(
+            PolicyViolation(
+                code="FAKE_TICKET_CREATION",
+                message="回复声称已创建/已提交售后工单，但证据账本中没有任何已创建的工单记录（严禁未调用 create_after_sales_ticket 就谎称建单成功）。",
+            )
         )
 
-    return reasons
+    # --- 规则 3：防内部 Markdown 文件路径泄露 ---
+    leaked_paths = sorted({m for m in _INTERNAL_MD_RE.findall(reply)})
+    if leaked_paths:
+        violations.append(
+            PolicyViolation(
+                code="INTERNAL_PATH_LEAK",
+                message=f"回复正文暴露了内部文档路径 {', '.join(leaked_paths)}，请改用自然的中文规则名称表达。",
+            )
+        )
+
+    return violations
+
+
+def verify_reply_against_ledger(reply: str, ledger: EvidenceLedger) -> list[str]:
+    """向后兼容包装：返回违规说明文本列表（空列表表示校验通过）。"""
+    return [v.message for v in verify_reply_structured(reply, ledger)]
 
 
 def _claims_concrete_order_status(reply: str) -> bool:

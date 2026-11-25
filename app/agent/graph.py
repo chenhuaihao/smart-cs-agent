@@ -28,11 +28,13 @@ from app.agent.guardrails import (
     MAX_VERIFY_RETRIES,
     EvidenceLedger,
     build_fallback_reply,
+    build_input_blocked_reply,
+    check_input_safety,
     get_max_steps,
     get_step_timeout_sec,
     merge_ledger,
     record_tool_evidence,
-    verify_reply_against_ledger,
+    verify_reply_structured,
 )
 from app.agent.tools import TOOLS_SCHEMA, execute_tool
 from app.llm.base import BaseLLMProvider, ToolCallRequest
@@ -157,6 +159,34 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     step_timeout = float(cfg.get("step_timeout_sec") or get_step_timeout_sec())
 
     steps = state.get("steps", 0)
+    if steps == 0:
+        # v3.0 P2 输入安全前置护栏：在调用 LLM 前 0ms 拦截高置信 Prompt Injection / 越权注入
+        user_messages = [m.get("content", "") for m in state.get("messages", []) if m.get("role") == "user"]
+        latest_user_text = str(user_messages[-1]) if user_messages else ""
+        blocked = check_input_safety(latest_user_text)
+        if blocked is not None:
+            code, reason = blocked
+            logger.warning("input_guard 拦截高风险注入输入 code=%s", code)
+            reply = build_input_blocked_reply(reason)
+            await adispatch_custom_event(
+                "stage",
+                {"stage": "input_guard_blocked", "code": code, "reason": reason},
+                config=config,
+            )
+            await adispatch_custom_event(
+                "token",
+                {"delta": reply, "step": 0},
+                config=config,
+            )
+            return {
+                "messages": [{"role": "assistant", "content": reply}],
+                "final_reply": reply,
+                "pending_tool_calls": [],
+                "steps": 1,
+                "verifier_passed": True,
+                "fallback_reason": "",
+            }
+
     if steps >= max_steps:
         logger.warning("agent_node 达到最大步数 %d，转入 fallback_node", max_steps)
         return {
@@ -332,34 +362,49 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]
 
 async def policy_verifier_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """
-    规则校验节点：用 EvidenceLedger 硬校验模型最终回复。
+    规则校验节点：用 EvidenceLedger 硬校验模型最终回复，输出结构化违规分类码。
     校验失败时将具体违规原因注入 messages 触发 agent_node 重写（最多重试 MAX_VERIFY_RETRIES=2 次）。
     """
+    if state.get("verifier_passed") is True and not state.get("pending_tool_calls"):
+        return {"verifier_passed": True, "fallback_reason": ""}
+
     reply = state.get("final_reply") or ""
     ledger = state.get("evidence_ledger") or EvidenceLedger()
-    reasons = verify_reply_against_ledger(reply, ledger)
+    violations = verify_reply_structured(reply, ledger)
+    reasons = [v.message for v in violations]
+    violation_codes = [v.code for v in violations]
 
     await adispatch_custom_event(
         "stage",
-        {"stage": "verifying", "passed": len(reasons) == 0, "reasons": reasons},
+        {
+            "stage": "verifying",
+            "passed": len(violations) == 0,
+            "reasons": reasons,
+            "violation_codes": violation_codes,
+        },
         config=config,
     )
 
-    if not reasons:
+    if not violations:
         return {"verifier_passed": True, "fallback_reason": ""}
 
     retry_count = state.get("retry_count", 0) + 1
     reason_text = "；".join(reasons)
-    logger.warning("policy_verifier 拦截 retry=%d/%d reasons=%s", retry_count, MAX_VERIFY_RETRIES, reason_text)
+    logger.warning(
+        "policy_verifier 拦截 retry=%d/%d codes=%s reasons=%s",
+        retry_count, MAX_VERIFY_RETRIES, violation_codes, reason_text,
+    )
 
     if retry_count <= MAX_VERIFY_RETRIES:
         feedback_msg = {
             "role": "user",
             "content": (
                 f"【系统规则校验未通过（第 {retry_count}/{MAX_VERIFY_RETRIES} 次重写）】\n"
+                f"违规分类：{', '.join(violation_codes)}\n"
                 f"违规原因：{reason_text}\n"
                 "请立即纠正：1) 若未查询订单，必须先调用 query_order 工具或请用户提供订单号，严禁凭空编造订单状态与运单号；"
-                "2) 若未调用或用户取消了 create_after_sales_ticket，严禁声称已创建工单。请重新生成合规答复或调用所需工具。"
+                "2) 若未调用或用户取消了 create_after_sales_ticket，严禁声称已创建工单；"
+                "3) 严禁在回复正文中暴露任何 .md 内部文件名，请改用自然的中文规则名称。请重新生成合规答复或调用所需工具。"
             ),
         }
         return {

@@ -1,8 +1,8 @@
-# Smart CS Agent v2.0 - 企业智能售后与工单分流 Agent
+# Smart CS Agent v3.0 - 企业智能售后与工单分流 Agent
 
 <p align="center">
   <b>面向真实电商售后与工单流转场景的生产级智能客服系统</b><br>
-  SSE 事务事件流 · 证据账本硬校验 · 高风险写操作 HITL · Hybrid RAG + Pre-RRF 双路门控
+  SSE 事务事件流 · 双层安全护栏与证据账本 · HITL 生命周期守护 · Hybrid RAG + Pre-RRF 双路门控
 </p>
 
 <p align="center">
@@ -10,6 +10,7 @@
   <img src="https://img.shields.io/badge/FastAPI-0.110+-009688.svg" alt="FastAPI">
   <img src="https://img.shields.io/badge/React-19_+_TypeScript-61DAFB.svg" alt="React 19">
   <img src="https://img.shields.io/badge/Hybrid_RAG-Hit@3_100%25-brightgreen.svg" alt="Hybrid RAG Hit@3 100%">
+  <img src="https://img.shields.io/badge/Tests-59_Passed_(47_BE_+_12_FE)-success.svg" alt="59 Tests Passed">
   <img src="https://img.shields.io/badge/Docker-Multi--Stage-2496ED.svg" alt="Docker Multi-Stage">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
 </p>
@@ -17,6 +18,7 @@
 <p align="center">
   🌐 <a href="http://8.166.124.35:8000/"><b>在线体验工作台</b></a> ·
   📊 <a href="http://8.166.124.35:8000/#eval"><b>在线评测报告页（实时读取 eval_summary.json）</b></a> ·
+  🏛️ <a href="docs/ARCHITECTURE.md"><b>架构决策（ADR）与排障复盘</b></a> ·
   📖 <a href="http://8.166.124.35:8000/docs"><b>Swagger API 文档</b></a>
 </p>
 
@@ -45,24 +47,25 @@
 | **3. Hybrid 无门控** | 96.7% | 100.0% | 93.3% | 0.8833 | 42.2% | 100.0% (10/10) | 137.0 / 213.0 |
 | **4. Hybrid + Pre-RRF 双路门控**（生产默认） | **100.0%** | **100.0%** | **100.0%** | **0.9833** | **72.8%** | **10.0% (1/10)** | **138.6 / 213.0** |
 
-### 2. 端到端 100 题并发业务评测核心指标
+### 2. 端到端 100 题并发业务评测核心指标（v3.0 实测）
 
-| 总体通过率 (Pass Rate) | 工具路由准确率 (Tool Accuracy) | 防幻觉安全率 (Safety Rate) | 平均 / P95 端到端耗时 | 在线评测明细 |
+| 总体通过率 (Pass Rate) | 工具路由准确率 (Tool Accuracy) | 防幻觉安全率 (Safety Rate) | 5 大模块达标情况 | 在线评测明细 |
 | :---: | :---: | :---: | :---: | :---: |
-| **90.0%** (90/100) | **94.0%** (94/100) | **97.0%** (97/100) | **1763 / 2873 ms** | 👉 [查看在线评测报告](http://8.166.124.35:8000/#eval) |
+| **96.0%** (96/100) | **97.0%** (97/100) | **98.0%** (98/100) | **5/5 全部 ≥ 90%（3 项 100%）** | 👉 [查看在线评测报告](http://8.166.124.35:8000/#eval) |
 
 > **关键结论**：相比纯 BM25，Hybrid + Pre-RRF 将口语化 Hit@3 从 **13.3% 提升至 100.0%**；相比无门控 Hybrid，将 **Precision@3 从 42.2% 提升至 72.8%（+30.6pp）**、域外误召回率从 **100.0% 降至 10.0%（-90.0pp）**；生产环境开启 256 容量 Query Embedding LRU 缓存后，高频问法耗时可降至 **~4.6 ms**。
 
 ---
 
-## 📌 项目定位与 v2.0 演进
+## 📌 项目定位与 v3.0 工程演进
 
-`smart-cs-agent` 是一套面向电商平台与企业客服真实业务场景的**生产级轻量智能售后 Agent**。v2.0 在保持轻量、透明、可逐行审计的基础上，围绕**可靠性、可观测性与检索精度**完成全面升级：
+`smart-cs-agent` 是一套面向电商平台与企业客服真实业务场景的**生产级轻量智能售后 Agent**。v3.0 在 v2.0（可恢复 SSE、Hybrid RAG、HITL 建单、React 控制台）基础上，进一步围绕**运行态收敛、双层安全护栏与全栈测试厚度**完成架构加固（详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)）：
 
-- **可恢复 SSE 事务事件流**：基于 SQLite 事务日志（`chat_turns` / `chat_events`）先落库分配严格递增 `seq` 再推流；前端维护 `turn_id + lastSeq + processedSeqs` 幂等去重，流中断后自动通过 `GET /api/chat/turns/{turn_id}/events?after_seq=...` 无缝补发。
-- **证据账本与代码级防幻觉护栏**：`LangGraph StateGraph` 显式编排 `agent → tools → policy_verifier → fallback` 闭环；工具执行结果写入 `EvidenceLedger`，由规则校验器硬拦截“未查单编造物流状态”或“未调用工具谎称已建单”，超限或超时安全降级。
-- **高风险写操作 HITL 人工确认**：流式模式下触发 `create_after_sales_ticket` 时自动挂起落库、推送 `approval_required` 事件并在对话流中渲染授权卡片，由用户显式点击「确认建单 / 取消建单」调用 `POST /api/chat/turns/{turn_id}/approve` 续流收尾。
+- **可恢复 SSE 事务事件流**：基于 SQLite WAL 事务日志（`chat_turns` / `chat_events`）先落库分配严格递增 `seq` 再推流；前端纯函数状态机 `streamReducer.ts` 维护 `turn_id + lastSeq + processedSeqs` 幂等去重，流中断后自动通过 `GET /api/chat/turns/{turn_id}/events?after_seq=...` 无缝补发。
+- **双层安全护栏（输入前置 + 证据账本后置）**：输入侧 0ms 拦截高置信 Prompt Injection / 系统提示词窃取 / 管理员身份伪造 / SQL 注入；输出侧 `LangGraph StateGraph`（`agent → tools → policy_verifier → fallback`）基于 `EvidenceLedger` 输出结构化违规码（`UNVERIFIED_ORDER` / `FAKE_TICKET_CREATION` / `INTERNAL_PATH_LEAK` 等），硬拦截编造订单、虚假建单与 `.md` 路径泄露，超限自动降级。
+- **高风险写操作 HITL 与生命周期闭环（v3.0）**：流式触发 `create_after_sales_ticket` 挂起落库并推送授权卡片；通过 `run_guard.py` 解耦活跃推理预算（`TURN_TIMEOUT_SEC`）与人工等待时限（`APPROVAL_TTL_SEC`），`/approve` 在发送 200 响应头前通过 SQLite `BEGIN IMMEDIATE` 原子 CAS 防并发双击重单，看门狗自动回收重启遗留僵尸 `running` 与过期 `expired` 审批。
 - **Hybrid RAG + Pre-RRF 双路原生门控**：融合 `jieba + rank-bm25` 词法检索与 `BAAI/bge-m3 + Chroma` 本地持久化语义检索，经 Pre-RRF 双路原生相关性门控与 RRF（$k=60$）单路尾部裁剪，在 40 题实测中实现 **100% Hit@3、0.9833 MRR、72.8% Precision@3、10% 域外误召回率**；无 Key 或在线超时自动降级纯 BM25，并配备进程级启动预热 + 256 容量 Query Embedding LRU 缓存（缓存命中耗时 ~4.6 ms）。
+- **全栈自动化测试与零依赖前端单测（v3.0）**：沉淀 **47 条后端 pytest 用例**（覆盖并发写事件 `seq`、HITL 5 线程并发双击 CAS、TTL 过期、跨重启恢复、僵尸看门狗、双层护栏、限流并发与单向状态机）+ **12 条前端原生 `node:test` 流式状态机用例**（零新增 npm 依赖）。
 - **React + TypeScript + Vite 控制台**：集成智能客服流式工作台、严格单向状态机工单看板（`待处理 → 处理中 → 已完成`，终态禁逆转）以及订单与 Hybrid RAG 实时联调面板。
 
 ---
@@ -181,16 +184,16 @@ docker compose logs -f smart-cs-agent
 ### 4. 单元测试与评测复现
 
 ```bash
-# 1. 运行全量后端单元测试（P0 流式与补发 + P1 护栏与 HITL + P2/P4 Hybrid RAG 与限流，零外网依赖）
+# 1. 运行全量后端单元测试（47 条：流式补发 / 双层护栏 / HITL 生命周期 / 并发压测 / Hybrid RAG，全离线）
 pytest tests/ -v
 
-# 2. 运行前端类型检查与生产构建
-cd frontend && npx tsc --noEmit && npm run build
+# 2. 运行前端原生单元测试（12 条 SSE 分包与状态机用例）、类型检查与生产构建
+cd frontend && npm test && npx tsc --noEmit && npm run build
 
 # 3. 复现 40 题 4 配置 RAG 量化评测（需 .env 已配置 EMBEDDING_API_KEY）
 python eval/run_rag_eval.py
 
-# 4. 复现 100 题端到端对话并发评测（需服务已启动）
+# 4. 复现 100 题端到端对话并发评测（需服务已启动，全量跑完自动同步 eval_summary.json）
 RATE_LIMIT_PER_MINUTE=1000 python eval/run_eval.py --workers 4
 ```
 
@@ -203,9 +206,10 @@ smart-cs-agent/
 ├── app/
 │   ├── main.py                   # FastAPI 入口、启动预热与 frontend/dist 自动托管
 │   ├── agent/
-│   │   ├── core.py               # 流式调度、整轮超时与 HITL 挂起/恢复
-│   │   ├── graph.py              # LangGraph 状态机（agent / tools / policy_verifier / fallback）
-│   │   ├── guardrails.py         # EvidenceLedger 证据账本与代码级规则校验器
+│   │   ├── core.py               # 流式调度、活跃预算与 HITL 挂起/恢复
+│   │   ├── run_guard.py          # v3.0 活跃预算解耦、APPROVAL_TTL 过期与僵尸轮次看门狗
+│   │   ├── graph.py              # LangGraph 状态机（input_guard / agent / tools / policy_verifier / fallback）
+│   │   ├── guardrails.py         # 双层护栏：输入安全检查 + EvidenceLedger 结构化违规码校验器
 │   │   ├── knowledge.py          # Hybrid RAG（BM25 + 向量 + Pre-RRF 门控 + RRF 裁剪 + LRU 缓存）
 │   │   ├── vector_store.py       # Chroma 本地持久化封装与内容哈希增量同步
 │   │   ├── tools.py              # 4 个业务工具定义与安全分发器
@@ -225,11 +229,15 @@ smart-cs-agent/
 │   └── src/
 │       ├── types/chat.ts         # 与后端对齐的完整 TypeScript 协议类型
 │       ├── api/client.ts         # REST + ReadableStream SSE 解析客户端
-│       ├── hooks/useChatStream.ts# 流式状态机、after_seq 自动补发与 seq 幂等去重
-│       └── components/           # ChatWorkspace / ApprovalCard / TicketBoard / InspectorDrawer / FormattedText
+│       ├── utils/streamReducer.ts# 纯函数 SSE 切帧器与流式事件状态机（附 12 条原生单元测试）
+│       ├── hooks/useChatStream.ts# 流式状态机 Hook、after_seq 自动补发与 seq 幂等去重
+│       └── components/           # ChatWorkspace / ApprovalCard / TicketBoard / InspectorDrawer / EvalReportView
+├── docs/
+│   ├── ARCHITECTURE.md           # v3.0 架构权衡决策（ADR）、HITL 状态机与 5 项真实排障复盘
+│   └── images/                   # 生产界面实拍图
 ├── data/knowledge/               # 6 篇售后规则与故障排查 Markdown 知识库
-├── eval/                         # 100 题端到端评测 + 40 题 4 配置 RAG 消融评测套件
-├── tests/                        # P0 / P1 / P2 / P4 自动化验收测试套件（19 条用例）
+├── eval/                         # 100 题端到端评测（含否定语境感知）+ 40 题 4 配置 RAG 消融评测套件
+├── tests/                        # 全离线自动化验收测试套件（47 条后端用例，含并发/安全/HITL 回归）
 ├── Dockerfile                    # Node 20 + Python 3.12 多阶段轻量构建
 ├── docker-compose.yml            # 单容器编排与数据卷持久化
 └── .env.example                  # 全量环境变量模板
