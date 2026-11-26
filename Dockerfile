@@ -41,5 +41,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).getcode() == 200 else 1)"
 
-# 容器启动命令（透传反向代理请求头与 IP 白名单）
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+# 容器启动命令（直连公网默认不信任客户端伪造的 X-Forwarded-For；若前置 Nginx/SLB 再显式开启 --proxy-headers 与 TRUST_PROXY_HEADERS=true）
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

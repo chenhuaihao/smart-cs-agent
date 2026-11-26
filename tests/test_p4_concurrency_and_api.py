@@ -118,7 +118,7 @@ def test_sliding_window_limiter_thread_safety_and_retry_after() -> None:
 
 def test_daily_quota_limiter_thread_safety() -> None:
     """20 线程同时冲撞 limit=7 的全站每日熔断器，严格放行 7 次、熔断 13 次。"""
-    quota = DailyQuotaLimiter(default_limit=7)
+    quota = DailyQuotaLimiter(default_limit=7, default_ip_limit=7)
 
     def _attempt(_: int) -> bool:
         try:
@@ -136,19 +136,49 @@ def test_daily_quota_limiter_thread_safety() -> None:
     assert quota.get_stats()["used"] == 7
 
 
-def test_get_client_ip_precedence_rules() -> None:
-    """验证反向代理头解析优先级：X-Forwarded-For 首跳 > X-Real-IP > request.client.host > 127.0.0.1。"""
-    req1 = SimpleNamespace(headers={"X-Forwarded-For": " 198.51.100.2, 10.0.0.1 "}, client=SimpleNamespace(host="127.0.0.1"))
-    assert get_client_ip(req1) == "198.51.100.2"
+def test_daily_quota_per_ip_isolation_protects_other_visitors() -> None:
+    """单 IP 达到每日上限后仅拦截该 IP，绝不耗尽全站额度影响其他真实访客（如面试官）。"""
+    quota = DailyQuotaLimiter(default_limit=10, default_ip_limit=3)
+    for _ in range(3):
+        quota.check_and_increment("198.51.100.10")
+    with pytest.raises(HTTPException) as exc_info:
+        quota.check_and_increment("198.51.100.10")
+    assert exc_info.value.status_code == 429
+    assert "单 IP 每日限 3 次" in str(exc_info.value.detail)
 
-    req2 = SimpleNamespace(headers={"X-Real-IP": "198.51.100.8"}, client=SimpleNamespace(host="127.0.0.1"))
-    assert get_client_ip(req2) == "198.51.100.8"
+    # 另一个独立 IP 仍可正常访问
+    quota.check_and_increment("198.51.100.20")
+    assert quota.get_stats()["used"] == 4
+    assert quota.get_stats()["active_ips"] == 2
 
-    req3 = SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.1.55"))
-    assert get_client_ip(req3) == "192.168.1.55"
 
-    req4 = SimpleNamespace(headers={}, client=None)
-    assert get_client_ip(req4) == "127.0.0.1"
+def test_get_client_ip_proxy_trust_boundary(monkeypatch) -> None:
+    """
+    验证代理头信任边界（修复直连公网伪造 X-Forwarded-For 绕过限流漏洞）：
+      - 默认 TRUST_PROXY_HEADERS=false：忽略伪造的 X-Forwarded-For / X-Real-IP，强制使用 TCP 对端 IP；
+      - 显式 TRUST_PROXY_HEADERS=true：按 X-Forwarded-For 首跳 > X-Real-IP > request.client.host 解析。
+    """
+    spoofed_req = SimpleNamespace(
+        headers={"X-Forwarded-For": "1.2.3.4, 10.0.0.1", "X-Real-IP": "5.6.7.8"},
+        client=SimpleNamespace(host="192.168.1.55"),
+    )
+
+    # 默认直连模式：忽略伪造头，返回真实 TCP host
+    monkeypatch.delenv("TRUST_PROXY_HEADERS", raising=False)
+    assert get_client_ip(spoofed_req) == "192.168.1.55"
+
+    # 开启受信任反代模式：正确解析转发头优先级
+    monkeypatch.setenv("TRUST_PROXY_HEADERS", "true")
+    assert get_client_ip(spoofed_req) == "1.2.3.4"
+
+    req_real_ip = SimpleNamespace(headers={"X-Real-IP": "198.51.100.8"}, client=SimpleNamespace(host="127.0.0.1"))
+    assert get_client_ip(req_real_ip) == "198.51.100.8"
+
+    req_direct = SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.1.55"))
+    assert get_client_ip(req_direct) == "192.168.1.55"
+
+    req_fallback = SimpleNamespace(headers={}, client=None)
+    assert get_client_ip(req_fallback) == "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------

@@ -131,29 +131,30 @@ _api_write_limiter = SlidingWindowLimiter(
 
 
 # ==============================================================================
-# 2. 每日全局调用用量熔断器 (DailyQuotaLimiter)
+# 2. 每日全局 + 单 IP 调用用量熔断器 (DailyQuotaLimiter)
 # ==============================================================================
 
 class DailyQuotaLimiter:
     """
-    基于内存的每日全局用量熔断限流器。
+    基于内存的每日双层用量熔断限流器（v3.0 收尾加固）：
 
     - 按北京时间（UTC+8）自然日 00:00 自动重置当日计数器；
-    - 读取环境变量 DAILY_CHAT_LIMIT，默认上限 200 次/天；
-    - 达到上限直接熔断抛出 HTTP 429，防止公网演示环境下被刷爆；
+    - 全局日上限：读取 DAILY_CHAT_LIMIT，默认 200 次/天；
+    - 单 IP 日上限：读取 DAILY_IP_CHAT_LIMIT，默认 30 次/天/IP，防止单个刷量者耗尽全站演示额度
+      导致后续真实面试官无法体验（若显式调高 DAILY_CHAT_LIMIT 用于压测且未单独设单 IP 上限，则放宽至全局上限）；
     - 采用 threading.Lock 保证并发读写安全性。
     """
 
-    def __init__(self, default_limit: int = 200) -> None:
+    def __init__(self, default_limit: int = 200, default_ip_limit: int = 30) -> None:
         self.default_limit = default_limit
+        self.default_ip_limit = default_ip_limit
         self._current_date_str: str = ""
         self._count: int = 0
+        self._ip_counts: Dict[str, int] = defaultdict(int)
         self._lock = threading.Lock()
 
     def _get_limit(self) -> int:
-        """
-        动态读取环境变量 DAILY_CHAT_LIMIT，支持覆盖默认上限。
-        """
+        """动态读取环境变量 DAILY_CHAT_LIMIT，支持覆盖默认全局日上限。"""
         env_val = os.getenv("DAILY_CHAT_LIMIT")
         if env_val:
             try:
@@ -164,24 +165,47 @@ class DailyQuotaLimiter:
                 pass
         return self.default_limit
 
-    def check_and_increment(self) -> None:
+    def _get_ip_limit(self, global_limit: int) -> int:
+        """动态读取 DAILY_IP_CHAT_LIMIT；若用于评测显式大幅调高了全局上限且未设单 IP 限制，则同步放宽。"""
+        env_val = os.getenv("DAILY_IP_CHAT_LIMIT")
+        if env_val:
+            try:
+                parsed = int(env_val.strip())
+                if parsed > 0:
+                    return parsed
+            except ValueError:
+                pass
+        if global_limit > self.default_limit:
+            return global_limit
+        return min(self.default_ip_limit, global_limit)
+
+    def check_and_increment(self, client_ip: str | None = None) -> None:
         """
-        判定是否超出当日全局总配额：
+        判定是否超出单 IP 日上限或当日全局总配额：
         - 跨日（北京时间 00:00）自动重置当日计数；
         - 超限抛出 HTTP 429 熔断异常；
-        - 未超限则自增计数并放行。
+        - 未超限则同步自增全局与单 IP 计数并放行。
         """
         now_beijing = datetime.now(BEIJING_TZ)
         today_str = now_beijing.strftime("%Y-%m-%d")
         limit = self._get_limit()
+        ip_limit = self._get_ip_limit(limit)
 
         with self._lock:
             # 跨自然日自动归零重置
             if today_str != self._current_date_str:
                 self._current_date_str = today_str
                 self._count = 0
+                self._ip_counts.clear()
 
-            # 达到或超出每日总限额直接抛出 429
+            # 1. 先检查单 IP 日上限，防止单访客刷光全站额度
+            if client_ip and self._ip_counts[client_ip] >= ip_limit:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"您今日的演示体验次数已达上限（单 IP 每日限 {ip_limit} 次），请明日 0 点后再试。",
+                )
+
+            # 2. 再检查全站每日总限额
             if self._count >= limit:
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -189,14 +213,19 @@ class DailyQuotaLimiter:
                 )
 
             self._count += 1
+            if client_ip:
+                self._ip_counts[client_ip] += 1
 
     def get_stats(self) -> dict:
         """获取当前配额使用快照（用于诊断与监控）"""
         with self._lock:
+            limit = self._get_limit()
             return {
                 "date": self._current_date_str,
                 "used": self._count,
-                "limit": self._get_limit(),
+                "limit": limit,
+                "ip_limit": self._get_ip_limit(limit),
+                "active_ips": len(self._ip_counts),
             }
 
 
@@ -208,24 +237,33 @@ _daily_quota_limiter = DailyQuotaLimiter()
 # 3. 辅助函数与 FastAPI 依赖项
 # ==============================================================================
 
+def _is_proxy_trusted() -> bool:
+    """
+    是否信任反向代理透传的 X-Forwarded-For / X-Real-IP 请求头。
+    默认 False：容器直接暴露公网端口时严禁信任客户端可伪造的转发头，防止绕过限流；
+    仅当前置了受信任的 Nginx / SLB 并覆盖转发头时，通过 TRUST_PROXY_HEADERS=true 显式开启。
+    """
+    return os.getenv("TRUST_PROXY_HEADERS", "false").strip().lower() in ("1", "true", "yes")
+
+
 def get_client_ip(request: Request) -> str:
     """
     解析请求的真实客户端 IP：
-    1. 优先检查反向代理（如 Nginx、Traefik、SLB）透传的 X-Forwarded-For 请求头（取首个非空有效 IP）；
-    2. 其次检查 X-Real-IP 请求头；
-    3. 若无反向代理请求头，回退至底层的 request.client.host；
-    4. 若仍获取不到，兜底返回 '127.0.0.1'。
+    1. 仅当 TRUST_PROXY_HEADERS=true 时，优先读取受信任反代透传的 X-Forwarded-For（首跳）与 X-Real-IP；
+    2. 默认（直连公网）忽略可伪造的转发头，直接读取 TCP 对端地址 request.client.host；
+    3. 若均不可用，兜底返回 '127.0.0.1'。
     """
-    x_forwarded_for = request.headers.get("X-Forwarded-For")
-    if x_forwarded_for:
-        for part in x_forwarded_for.split(","):
-            cleaned = part.strip()
-            if cleaned:
-                return cleaned
+    if _is_proxy_trusted():
+        x_forwarded_for = request.headers.get("X-Forwarded-For")
+        if x_forwarded_for:
+            for part in x_forwarded_for.split(","):
+                cleaned = part.strip()
+                if cleaned:
+                    return cleaned
 
-    x_real_ip = request.headers.get("X-Real-IP")
-    if x_real_ip and x_real_ip.strip():
-        return x_real_ip.strip()
+        x_real_ip = request.headers.get("X-Real-IP")
+        if x_real_ip and x_real_ip.strip():
+            return x_real_ip.strip()
 
     if request.client and request.client.host:
         return request.client.host
@@ -233,21 +271,35 @@ def get_client_ip(request: Request) -> str:
     return "127.0.0.1"
 
 
+def _has_valid_demo_bypass(request: Request) -> bool:
+    """可选的演示/面试官通行口令校验（配置 DEMO_BYPASS_TOKEN 且请求头匹配时放行日配额）。"""
+    expected = os.getenv("DEMO_BYPASS_TOKEN", "").strip()
+    if not expected:
+        return False
+    provided = request.headers.get("X-Demo-Bypass-Token", "").strip()
+    return provided == expected
+
+
 def check_chat_rate_limit(request: Request) -> None:
     """
-    挂载在 POST /api/chat 的单 IP 频次限流依赖项。
+    挂载在 POST /api/chat 与 /api/chat/stream 的单 IP 频次限流依赖项。
     在执行任何 Agent 思考或大模型 API 调用前进行防刷拦截。
     """
+    if _has_valid_demo_bypass(request):
+        return
     client_ip = get_client_ip(request)
     _chat_limiter.check(client_ip)
 
 
-def check_daily_quota_limit() -> None:
+def check_daily_quota_limit(request: Request) -> None:
     """
-    挂载在 POST /api/chat 的每日全局调用上限熔断依赖项。
+    挂载在 POST /api/chat 与 /api/chat/stream 的每日双层配额熔断依赖项（单 IP + 全局）。
     按北京时间每日 00:00 自动重置，超出上限直接返回 HTTP 429。
     """
-    _daily_quota_limiter.check_and_increment()
+    if _has_valid_demo_bypass(request):
+        return
+    client_ip = get_client_ip(request)
+    _daily_quota_limiter.check_and_increment(client_ip)
 
 
 def check_api_read_rate_limit(request: Request) -> None:

@@ -439,3 +439,63 @@ def test_structured_verifier_codes_and_md_path_leak_auto_rewrite(isolated_db) ->
 
         done = next(f["data"]["data"] for f in frames if f["event"] == "done")
         assert ".md" not in done["reply"]
+
+
+def test_indirect_prompt_injection_tool_output_fencing_and_segmented_timing(isolated_db) -> None:
+    """
+    验证：
+      1. tool_node 返回的 search_knowledge_base 内容进入 LLM 消息时被 <untrusted_tool_output> 围栏隔离；
+      2. done 事件携带分段耗时 timing（llm_ms / tool_ms / db_ms / total_ms），且流式 token 批量聚合不丢字。
+    """
+    captured_tool_contents: list[str] = []
+
+    class _InspectToolFenceProvider(BaseLLMProvider):
+        name = "mock-fence"
+
+        async def astream_chat(
+            self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+        ) -> AsyncIterator[LLMStreamChunk]:
+            last = messages[-1]
+            if last["role"] == "tool":
+                captured_tool_contents.append(str(last["content"]))
+                # 故意拆成 30 个单字碎片，验证批量聚合落库后正文零丢失
+                full_text = "根据本店7天无理由退货规定，未拆封耳机签收7天内可申请退货。"
+                for ch in full_text:
+                    yield LLMStreamChunk(type="text_delta", text=ch)
+                return
+            yield LLMStreamChunk(
+                type="tool_calls",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_kb_fence",
+                        name="search_knowledge_base",
+                        arguments=json.dumps({"query": "未拆封耳机退货"}, ensure_ascii=False),
+                    )
+                ],
+            )
+
+    set_llm_provider(_InspectToolFenceProvider())
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/chat/stream",
+            json={"session_id": "v3-fence-timing", "message": "未拆封耳机可以退货吗？"},
+        )
+        assert resp.status_code == 200
+        frames = _parse_sse(resp.text)
+
+        # 1. 验证外部知识库工具返回被 <untrusted_tool_output> 围栏包裹
+        assert len(captured_tool_contents) == 1
+        assert captured_tool_contents[0].startswith('<untrusted_tool_output tool="search_knowledge_base">')
+        assert captured_tool_contents[0].endswith("</untrusted_tool_output>")
+
+        # 2. 验证 29 个单字被聚合为极少数 token 事件（<<29），且拼接内容 100% 完整
+        token_frames = [f for f in frames if f["event"] == "token"]
+        assert 1 <= len(token_frames) <= 5
+        joined = "".join(f["data"]["data"]["delta"] for f in token_frames)
+        done = next(f["data"]["data"] for f in frames if f["event"] == "done")
+        assert joined == done["reply"] == "根据本店7天无理由退货规定，未拆封耳机签收7天内可申请退货。"
+
+        # 3. 验证 done 携带分段耗时 timing 字段
+        timing = done.get("timing") or {}
+        assert set(timing.keys()) == {"llm_ms", "tool_ms", "db_ms", "total_ms"}
+        assert all(isinstance(v, int) and v >= 0 for v in timing.values())

@@ -190,7 +190,7 @@ export function ChatWorkspace({
           <div className="empty-state">
             <div className="empty-state__head">
               <div className="empty-state__icon">AI</div>
-              <h3>欢迎使用 Smart CS Agent v2.0 控制台</h3>
+              <h3>欢迎使用 Smart CS Agent v3.0 控制台</h3>
             </div>
             <p>
               点击下方快捷场景，体验 SSE 实时流式输出、Hybrid RAG（BM25 / 向量 / RRF）溯源标签与 HITL 建单确认。

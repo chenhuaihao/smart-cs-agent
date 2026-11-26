@@ -23,8 +23,9 @@
   2. **输出证据账本硬校验（`EvidenceLedger`）**：工具执行结果结构化写入账本，对高置信结构化幻觉（未查订单号、未核实运单号、未建单却声称已建单、暴露内部 `.md` 路径）输出结构化违规码（`UNVERIFIED_ORDER` / `FAKE_TICKET_CREATION` / `INTERNAL_PATH_LEAK` 等），触发最多 2 次重写，超限转入 `fallback_node`。
 - **边界坦诚与演进**：确定性规则擅长守住结构化事实红线，无法覆盖隐晦语义偏移；后续若进入高客单价企业生产环境，可在离线链路增加**异步 LLM-as-a-Judge 抽检**做质量巡检，兼顾在线低延迟与离线语义覆盖。
 
-### ADR-4：单机内存限流器的边界与多实例演进
-- **当前实现**：`app/core/limiter.py` 纯标准库实现线程安全滑动时间窗口（单 IP 频控）+ 北京时间自然日全局熔断（`DAILY_CHAT_LIMIT`）+ 演示重置双层保护（口令 / 冷却），零依赖且支持反向代理 `X-Forwarded-For` 解析。
+### ADR-4：单机内存限流器的边界、代理头信任与多实例演进
+- **当前实现**：`app/core/limiter.py` 纯标准库实现线程安全滑动时间窗口（单 IP 频控）+ 北京时间自然日**双层配额熔断**（单 IP 每日上限 `DAILY_IP_CHAT_LIMIT=30` 防单人耗尽全站额度 + 全站每日上限 `DAILY_CHAT_LIMIT=200`）+ 演示重置双层保护（口令 / 冷却）。
+- **代理头信任边界（安全加固）**：`TRUST_PROXY_HEADERS` 默认为 `false`，当容器直接暴露公网端口时强制使用 TCP 对端地址 `request.client.host`，彻底忽略客户端可伪造的 `X-Forwarded-For` / `X-Real-IP` 请求头；仅当前置受信任 Nginx/SLB 清洗请求头后才显式开启 `TRUST_PROXY_HEADERS=true`。
 - **多实例演进**：多节点部署时可将 `SlidingWindowLimiter` 与 `DailyQuotaLimiter` 替换为 Redis ZSET Lua 脚本实现集群共享配额，路由层 `Depends(...)` 签名无需任何改动。
 
 ---
@@ -74,3 +75,12 @@ stateDiagram-v2
 5. **自动化评测脚本静态黑名单误伤否定句（v3.0 P4 修复）**
    - **现象**：回复“该商品**不支持**7天无理由退货”或“关于**是否**支持24期免息”被 `kw in reply` 静态子串匹配误判为违规词命中（假阴性）。
    - **修复**：在 `eval/run_eval.py` 引入否定/疑问窗口感知匹配 `_is_affirmative_forbidden_hit`，区分真实肯定违规与合规否定解释。
+
+6. **高频流式逐 Token 独立写 SQLite 事务放大并发延迟 + 缺少分段计时（v3.0 收尾修复）**
+   - **现象**：100 题并发评测平均耗时从 v1.0（纯本地 BM25 非流式，1.76s）升至 v3.0（8.44s），除上游 API 晚高峰排队与在线 Embedding 耗时外，源码排查发现同步 `/api/chat` 复用了流式逐字 `_emit`，每吐 1~3 个字符就开 1 次 `BEGIN IMMEDIATE` 写锁事务，4 线程并发下高频争抢写锁。
+   - **修复**：在 `core.py` 对流式 `token` 事件引入批量聚合落盘（`>=24 字` 或 `>=80ms` 或遇到非 token 事件刷盘），同步 `/api/chat` 设置 `persist_tokens=False` 跳过逐字落库，`database.py` 补充 WAL 官方推荐的 `PRAGMA synchronous=NORMAL`，同时在 `done` 事件与日志输出 `timing: {llm_ms, tool_ms, db_ms, total_ms}`。
+   - **分段实测验证（预热态真实流式探针）**：单轮查单 `total=4312ms`（`llm_ms=4123ms`, `tool_ms=30ms`, 并发交织 `db_ms=733ms`）、口语化 RAG 问答 `total=4484ms`（`llm_ms=4376ms`, `tool_ms=15ms`, 并发交织 `db_ms=860ms`），量化证实 **95% 以上端到端耗时来自上游大模型推理**，本地工具与检索仅占 `< 1%`。
+
+7. **工具返回外部文本防间接提示注入 + 独立留出集验证防过拟合（v3.0 收尾修复）**
+   - **现象**：`search_knowledge_base` 与 `query_tickets`（含用户留言）直接拼入 LLM 上下文，且 40 题 RAG 门控阈值在同集校准存在过拟合质疑。
+   - **修复**：在 `graph.py` 对上述两类工具返回加 `<untrusted_tool_output>` 数据围栏并在 `prompts.py` 声明严禁执行其中指令；新增 18 题独立留出集 `eval/rag_holdout_cases.json` 零改参复测，验证 Hit@3 仍为 **100.0%**、Precision@3 **69.4%（+27.7pp）**、域外 FPR **16.7%（-83.3pp）**。

@@ -36,7 +36,9 @@ _PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 _KNOWLEDGE_DIR: Path = _PROJECT_ROOT / "data" / "knowledge"
 _CHROMA_DIR: Path = _PROJECT_ROOT / "data" / "chroma_db"
 
-# RRF 平滑常数与 Pre-RRF 双路原生相关性门控默认值（基于 BAAI/bge-m3 40 题分布校准：域内最小 0.619，域外最大 0.568）
+# RRF 平滑常数与 Pre-RRF 双路原生相关性门控默认值：
+# 阈值基于 40 题开发校准集（eval/rag_eval_cases.json，域内最小 0.619 / 域外最大 0.568）定型，
+# 并已在 18 题未参与调参的独立留出集（eval/rag_holdout_cases.json）上零改参复核通过（详见 eval/rag_holdout_report.md）。
 DEFAULT_RRF_K: int = 60
 DEFAULT_BM25_MIN_SCORE: float = 3.0
 DEFAULT_BM25_MIN_RATIO: float = 0.50

@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="Smart CS Agent API",
     description="企业智能售后与工单分流 Agent 核心后端接口",
-    version="0.3.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 

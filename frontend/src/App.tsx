@@ -80,7 +80,7 @@ export default function App() {
           <div className="topbar__logo">CS</div>
           <div>
             <div className="topbar__name">
-              Smart CS Agent <span className="topbar__ver">v2.0</span>
+              Smart CS Agent <span className="topbar__ver">v3.0</span>
             </div>
             <div className="topbar__desc">企业智能售后与工单分流控制台</div>
           </div>

@@ -12,6 +12,7 @@ v2.0 P4-B 4 配置 RAG 量化消融评测脚本（基于真实本地知识库 + 
 并自动生成 Markdown 报告至 eval/rag_eval_report.md。
 """
 
+import argparse
 from datetime import datetime
 import json
 import math
@@ -29,7 +30,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 from app.agent.knowledge import KnowledgeRetriever  # noqa: E402
 
 _CASES_PATH = Path(__file__).resolve().parent / "rag_eval_cases.json"
+_HOLDOUT_CASES_PATH = Path(__file__).resolve().parent / "rag_holdout_cases.json"
 _REPORT_PATH = Path(__file__).resolve().parent / "rag_eval_report.md"
+_HOLDOUT_REPORT_PATH = Path(__file__).resolve().parent / "rag_holdout_report.md"
 _SUMMARY_JSON_PATH = Path(__file__).resolve().parent / "eval_summary.json"
 _E2E_REPORT_PATH = Path(__file__).resolve().parent / "eval_report.md"
 
@@ -152,19 +155,29 @@ def _build_markdown_report(
     model_name: str,
     retriever: KnowledgeRetriever,
     cases_count: int,
+    *,
+    dataset_label: str = "eval/rag_eval_cases.json",
+    title: str = "# Hybrid RAG 4 配置量化评测报告（v3.0）",
 ) -> str:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sample = results[0] if results else {}
+    ood_n = int(sample.get("ood_total", 0))
+    details_sample = sample.get("details", [])
+    formal_n = sum(1 for d in details_sample if d.get("category") == "formal")
+    colloquial_n = sum(1 for d in details_sample if d.get("category") == "colloquial")
+    in_domain_n = formal_n + colloquial_n
+
     lines = [
-        "# Hybrid RAG 4 配置量化评测报告（v2.0 P4-B）",
+        title,
         "",
         f"> 生成时间：{now_str}  ",
-        f"> 评测集：`eval/rag_eval_cases.json`（共 {cases_count} 题：15 书面条款 + 15 口语化同义表达 + 10 域外无答案）  ",
+        f"> 评测集：`{dataset_label}`（共 {cases_count} 题：{formal_n} 书面条款 + {colloquial_n} 口语化同义表达 + {ood_n} 域外无答案）  ",
         f"> 在线 Embedding 模型：`{model_name}`（Chroma 本地持久化 + BM25Okapi）  ",
         f"> Pre-RRF 门控参数：`BM25_MIN_SCORE={retriever._bm25_min_score}`、`BM25_MIN_RATIO={retriever._bm25_min_ratio}`、`VECTOR_MIN_SIMILARITY={retriever._vector_min_similarity}`、`VECTOR_MAX_DROP={retriever._vector_max_drop}`、`RRF_SINGLE_PATH_RATIO={retriever._rrf_single_path_ratio}`",
         "",
         "## 1. 四组配置核心指标对比",
         "",
-        "| 检索配置 | Hit@3（30题） | 书面 Hit@3（15题） | 口语 Hit@3（15题） | MRR | Precision@3 | 无答案误召回率 FPR（10题） | 平均耗时 (ms) | P95 耗时 (ms) |",
+        f"| 检索配置 | Hit@3（{in_domain_n}题） | 书面 Hit@3（{formal_n}题） | 口语 Hit@3（{colloquial_n}题） | MRR | Precision@3 | 无答案误召回率 FPR（{ood_n}题） | 平均耗时 (ms) | P95 耗时 (ms) |",
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
     ]
 
@@ -186,10 +199,10 @@ def _build_markdown_report(
             "",
             "## 2. 指标口径说明",
             "",
-            "- **Hit@3**：30 条有答案用例中，Top-3 返回结果至少命中 1 条标准 `expected_sources` 的比例。",
+            f"- **Hit@3**：{in_domain_n} 条有答案用例中，Top-3 返回结果至少命中 1 条标准 `expected_sources` 的比例。",
             "- **MRR（Mean Reciprocal Rank）**：首个命中标准条款的倒数排名均值，衡量最相关条款排在首位的准确度。",
             "- **Precision@3（相关精确率）**：每条有答案用例中“返回结果里真正相关条款数 / 实际返回条数”的均值（空返回记 0）；该指标直接惩罚“无关条文蹭进 Top-3”。",
-            "- **无答案误召回率（FPR）**：10 条知识库未覆盖的域外问题中，错误返回非空条款的比例（越低越好，0.0% 表示完美拒答）。",
+            f"- **无答案误召回率（FPR）**：{ood_n} 条知识库未覆盖的域外问题中，错误返回非空条款的比例（越低越好，0.0% 表示完美拒答）。",
             "- **耗时口径**：为保证 4 组对比公平，评测关闭 Query Embedding 内存缓存，均为真实冷查询耗时（生产开启 LRU 缓存后高频问法可降至 ~5 ms）。",
             "",
             "## 3. Hybrid + Pre-RRF 双路门控 Bad Case / 误召回明细",
@@ -204,7 +217,7 @@ def _build_markdown_report(
         or (d["category"] != "out_of_domain" and not d["hit"])
     ]
     if not bad_cases:
-        lines.append("- 🎉 **全部 40 条用例零漏召回、零域外误召回！**")
+        lines.append(f"- 🎉 **全部 {cases_count} 条用例零漏召回、零域外误召回！**")
     else:
         lines.append("| 用例 | 类型 | 查询 | 期望来源 | 实际返回 |")
         lines.append("| :--- | :--- | :--- | :--- | :--- |")
@@ -425,7 +438,17 @@ def _build_summary_json(
 
 
 def main() -> None:
-    cases: list[dict[str, Any]] = json.loads(_CASES_PATH.read_text(encoding="utf-8"))
+    parser = argparse.ArgumentParser(description="Hybrid RAG 4 配置量化消融评测脚本")
+    parser.add_argument(
+        "--holdout",
+        action="store_true",
+        help="在独立留出验证集（eval/rag_holdout_cases.json，未参与门控阈值校准）上运行评测并保存至 rag_holdout_report.md",
+    )
+    args = parser.parse_args()
+
+    cases_path = _HOLDOUT_CASES_PATH if args.holdout else _CASES_PATH
+    report_path = _HOLDOUT_REPORT_PATH if args.holdout else _REPORT_PATH
+    cases: list[dict[str, Any]] = json.loads(cases_path.read_text(encoding="utf-8"))
 
     # 关闭 Query 缓存以确保 4 组配置均测量真实冷查询延迟
     bm25_retriever = KnowledgeRetriever(enable_vector=False, query_cache_size=0)
@@ -469,23 +492,35 @@ def main() -> None:
 
     all_results: list[dict[str, Any]] = []
     for cfg_name, fn in configs:
-        print(f"Running {cfg_name} ({len(cases)} cases)...", flush=True)
+        print(f"Running {cfg_name} ({len(cases)} cases, holdout={args.holdout})...", flush=True)
         res = _evaluate_config(cfg_name, cases, fn)
         all_results.append(res)
 
-    report_md = _build_markdown_report(all_results, model_name, hybrid_retriever, len(cases))
-    _REPORT_PATH.write_text(report_md, encoding="utf-8")
-
-    e2e_data = _parse_e2e_report(_E2E_REPORT_PATH)
-    summary_payload = _build_summary_json(all_results, model_name, hybrid_retriever, cases, e2e_data)
-    _SUMMARY_JSON_PATH.write_text(
-        json.dumps(summary_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    report_md = _build_markdown_report(
+        all_results,
+        model_name,
+        hybrid_retriever,
+        len(cases),
+        dataset_label="eval/rag_holdout_cases.json" if args.holdout else "eval/rag_eval_cases.json",
+        title=(
+            "# Smart CS Agent v3.0 Hybrid RAG 独立留出集（Hold-out）验证报告"
+            if args.holdout
+            else "# Hybrid RAG 4 配置量化评测报告（v3.0）"
+        ),
     )
+    report_path.write_text(report_md, encoding="utf-8")
+
+    if not args.holdout:
+        e2e_data = _parse_e2e_report(_E2E_REPORT_PATH)
+        summary_payload = _build_summary_json(all_results, model_name, hybrid_retriever, cases, e2e_data)
+        _SUMMARY_JSON_PATH.write_text(
+            json.dumps(summary_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"Saved summary JSON to: {_SUMMARY_JSON_PATH}")
 
     print("\n" + report_md)
-    print(f"Saved report to: {_REPORT_PATH}")
-    print(f"Saved summary JSON to: {_SUMMARY_JSON_PATH}")
+    print(f"Saved report to: {report_path}")
 
 
 if __name__ == "__main__":

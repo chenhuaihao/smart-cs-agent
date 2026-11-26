@@ -45,7 +45,11 @@ export function EvalReportView() {
         <div className="ticket-board__toolbar">
           {summary && (
             <span className="meta-pill">
-              生成时间：{summary.generated_at} · 模型：<code>{summary.embedding_model}</code>
+              RAG 评测：{summary.generated_at}
+              {summary.e2e_summary?.evaluated_at
+                ? ` · E2E 评测：${String(summary.e2e_summary.evaluated_at)}`
+                : ''}
+              {' · '}模型：<code>{summary.embedding_model}</code>
             </span>
           )}
           <button

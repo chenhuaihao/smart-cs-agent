@@ -1,0 +1,141 @@
+[
+  {
+    "id": "H-F01",
+    "category": "formal",
+    "query": "蓝牙耳机拆封后发现单耳无声等出厂瑕疵，签收15天内能免费换新吗？运费谁出？",
+    "expected_sources": [
+      "return_policy.md#耳机类退货规则 > 拆封耳机——存在质量瑕疵",
+      "return_policy.md#15天质量问题换新规则 > 换新适用范围"
+    ]
+  },
+  {
+    "id": "H-F02",
+    "category": "formal",
+    "query": "购买定制刻字商品或已拆封耳机，是否属于7天无理由退货排除类目？",
+    "expected_sources": [
+      "return_policy.md#7天无理由退货规则 > 7天无理由退货排除类目",
+      "coupon_and_custom_rules.md#定制商品与特殊类目售后条款 > 镭射定制与个性化刻字商品排除条款"
+    ]
+  },
+  {
+    "id": "H-F03",
+    "category": "formal",
+    "query": "商品存在硬件故障申请官方寄修需要哪些步骤？",
+    "expected_sources": [
+      "warranty_policy.md#寄修流程与时效 > 寄修申请步骤",
+      "warranty_policy.md#寄修流程与时效 > 维修时效汇总"
+    ]
+  },
+  {
+    "id": "H-F04",
+    "category": "formal",
+    "query": "签收后商品出现非人为质量故障，哪些情形属于免费保修范围？",
+    "expected_sources": [
+      "warranty_policy.md#免费保修界定 > 属于免费保修的情形"
+    ]
+  },
+  {
+    "id": "H-F05",
+    "category": "formal",
+    "query": "大促限时秒杀降价是否适用7天价保，价保例外条款怎么规定？",
+    "expected_sources": [
+      "invoice_and_price_protection.md#价格保护政策 > 价保排除与大促例外条款",
+      "invoice_and_price_protection.md#价格保护政策 > 7天价保规则"
+    ]
+  },
+  {
+    "id": "H-F06",
+    "category": "formal",
+    "query": "快递物流超过多长时间没有更新属于异常，怎么申请查件？",
+    "expected_sources": [
+      "shipping_and_refund.md#物流异常处理 > 物流长时间无更新"
+    ]
+  },
+  {
+    "id": "H-C01",
+    "category": "colloquial",
+    "query": "我买的耳机壳子裂了、盒子充不进电，这种自带的配件坏了能保修多久？",
+    "expected_sources": [
+      "warranty_policy.md#电子产品质保期限 > 配件质保期",
+      "troubleshooting_guide.md#蓝牙耳机常见故障自助排查 > 耳机充电仓无法充电排查"
+    ]
+  },
+  {
+    "id": "H-C02",
+    "category": "colloquial",
+    "query": "手机显示快递员送到了但我压根没见着包裹影儿，咋办呀",
+    "expected_sources": [
+      "shipping_and_refund.md#物流异常处理 > 已签收未收到商品"
+    ]
+  },
+  {
+    "id": "H-C03",
+    "category": "colloquial",
+    "query": "我上周退完货商家也同意了，钱退回银行卡咋还没进账呢",
+    "expected_sources": [
+      "shipping_and_refund.md#退款审核与到账时效 > 退款原路退回说明",
+      "shipping_and_refund.md#退款审核与到账时效 > 退款处理流程"
+    ]
+  },
+  {
+    "id": "H-C04",
+    "category": "colloquial",
+    "query": "前天下的单到现在还没动静，你们一般几天发出来啊",
+    "expected_sources": [
+      "shipping_and_refund.md#发货时效 > 标准发货时效",
+      "shipping_and_refund.md#发货时效 > 超时未发货处理"
+    ]
+  },
+  {
+    "id": "H-C05",
+    "category": "colloquial",
+    "query": "不小心把水洒到耳机上开不了机了，这种情况给免费修不",
+    "expected_sources": [
+      "warranty_policy.md#免费保修界定 > 不属于免费保修的情形（人为损坏）"
+    ]
+  },
+  {
+    "id": "H-C06",
+    "category": "colloquial",
+    "query": "公司财务要抵扣税，怎么让你们开专票呀",
+    "expected_sources": [
+      "invoice_and_price_protection.md#发票开具规则 > 增值税专用发票申请"
+    ]
+  },
+  {
+    "id": "H-O01",
+    "category": "out_of_domain",
+    "query": "你们品牌支持旧手机以旧换新抵扣购机款吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "H-O02",
+    "category": "out_of_domain",
+    "query": "想代理你们家产品做校园团购分销，怎么联系渠道经理？",
+    "expected_sources": []
+  },
+  {
+    "id": "H-O03",
+    "category": "out_of_domain",
+    "query": "可以买电子礼品卡送朋友并在门店核销吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "H-O04",
+    "category": "out_of_domain",
+    "query": "请问用信用卡积分能兑换你们店里的无门槛券吗？",
+    "expected_sources": []
+  },
+  {
+    "id": "H-O05",
+    "category": "out_of_domain",
+    "query": "今年国庆节期间你们仓库在广州还是杭州放假？",
+    "expected_sources": []
+  },
+  {
+    "id": "H-O06",
+    "category": "out_of_domain",
+    "query": "帮忙对比一下 iPhone 16 和华为 Mate 70 的拍照效果",
+    "expected_sources": []
+  }
+]

@@ -43,6 +43,9 @@ from app.llm.base import BaseLLMProvider
 logger = logging.getLogger(__name__)
 
 _FORWARD_EVENTS = {"stage", "tool_call", "citation", "token"}
+# 流式 token 落盘批量聚合阈值：降低高频逐字写 SQLite 锁竞争，同时保持流畅打字机推送（>=24 字或 >=80ms 刷盘）
+_TOKEN_COALESCE_MIN_CHARS = 24
+_TOKEN_COALESCE_MAX_WAIT_SEC = 0.08
 _background_tasks: set["asyncio.Task[None]"] = set()
 _active_turn_ids: set[str] = set()
 
@@ -100,27 +103,82 @@ async def _consume_graph_events(
     config: dict[str, Any],
     started_at: float,
     wait_ctx: _ApprovalWaitContext,
-) -> tuple[dict[str, Any], list[str], list[str], int | None]:
-    """消费图事件并实时落库入队（通过 wait_ctx.queue 动态路由到当前活跃的 SSE 队列）。"""
+    *,
+    persist_tokens: bool = True,
+) -> tuple[dict[str, Any], list[str], list[str], int | None, int]:
+    """
+    消费图事件并实时落库入队（通过 wait_ctx.queue 动态路由到当前活跃的 SSE 队列）：
+      - persist_tokens=True（流式模式）：对连续非降级 token 碎片做轻量聚合（>=24 字或 >=80ms 或遇到非 token 事件即刷盘），
+        将单轮 SQLite 写事务次数从 ~150 次降至 ~10-20 次，显著缓解并发写锁竞争；
+      - persist_tokens=False（同步 /api/chat 模式）：跳过中间 token 逐字落盘，仅落关键生命周期事件与 done 终态；
+      - 返回 (final_state, tools_called, citations, ttft_ms, db_ms)。
+    """
     ttft_ms: int | None = None
     tools_called: list[str] = []
     citations: list[str] = []
     final_state: dict[str, Any] = {}
+    db_ms = 0
+
+    token_buf: list[str] = []
+    token_step: int = 0
+    token_buf_since: float | None = None
+
+    async def _timed_emit(ev_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal db_ms
+        t0 = time.monotonic()
+        rec = await _emit(turn_id, ev_type, payload)
+        db_ms += int((time.monotonic() - t0) * 1000)
+        return rec
+
+    async def _flush_token_buf() -> None:
+        nonlocal token_buf_since
+        if not token_buf:
+            return
+        merged_delta = "".join(token_buf)
+        token_buf.clear()
+        token_buf_since = None
+        if persist_tokens:
+            await wait_ctx.queue.put(
+                await _timed_emit("token", {"delta": merged_delta, "step": token_step})
+            )
 
     async for ev in agent_graph.astream_events(initial_state, config=config, version="v2"):
         if ev["event"] == "on_custom_event" and ev["name"] in _FORWARD_EVENTS:
             name, data = ev["name"], ev["data"]
-            if name == "token" and ttft_ms is None:
-                ttft_ms = _elapsed_ms(started_at)
-            elif name == "tool_call" and data.get("status") != "cancelled":
+            if name == "token":
+                if ttft_ms is None:
+                    ttft_ms = _elapsed_ms(started_at)
+                if not persist_tokens:
+                    continue
+                if data.get("fallback"):
+                    await _flush_token_buf()
+                    await wait_ctx.queue.put(await _timed_emit("token", data))
+                    continue
+                step_val = int(data.get("step", 0) or 0)
+                if token_buf and step_val != token_step:
+                    await _flush_token_buf()
+                token_step = step_val
+                if token_buf_since is None:
+                    token_buf_since = time.monotonic()
+                token_buf.append(str(data.get("delta", "")))
+                buf_len = sum(len(s) for s in token_buf)
+                if buf_len >= _TOKEN_COALESCE_MIN_CHARS or (
+                    time.monotonic() - token_buf_since >= _TOKEN_COALESCE_MAX_WAIT_SEC
+                ):
+                    await _flush_token_buf()
+                continue
+
+            await _flush_token_buf()
+            if name == "tool_call" and data.get("status") != "cancelled":
                 tools_called.append(data["name"])
             elif name == "citation":
                 citations = merge_citations(citations, data["citations"])
-            await wait_ctx.queue.put(await _emit(turn_id, name, data))
+            await wait_ctx.queue.put(await _timed_emit(name, data))
         elif ev["event"] == "on_chain_end" and not ev.get("parent_ids"):
             final_state = ev["data"].get("output") or {}
 
-    return final_state, tools_called, citations, ttft_ms
+    await _flush_token_buf()
+    return final_state, tools_called, citations, ttft_ms, db_ms
 
 
 async def _run_turn(
@@ -131,6 +189,7 @@ async def _run_turn(
     queue: "asyncio.Queue[dict[str, Any] | None]",
     provider: BaseLLMProvider | None,
     auto_approve: bool,
+    persist_tokens: bool = True,
 ) -> None:
     """
     生产者：执行整轮推理并把"已落库"的事件放进队列。
@@ -141,6 +200,7 @@ async def _run_turn(
     tools_called: list[str] = []
     citations: list[str] = []
     final_state: dict[str, Any] = {}
+    db_ms = 0
     status, final_type, error = event_store.TURN_COMPLETED, "done", None
     cancelled = False
     turn_timeout = get_turn_timeout_sec()
@@ -208,11 +268,19 @@ async def _run_turn(
         }
 
         # 活跃预算控制：HITL 挂起等待人工决策期间不消耗 TURN_TIMEOUT_SEC，修复长思考被 45s 误杀的问题
-        final_state, tools_called, citations, ttft_ms = await await_with_active_budget(
-            _consume_graph_events(turn_id, initial_state, config, started_at, wait_ctx),
+        final_state, tools_called, citations, ttft_ms, graph_db_ms = await await_with_active_budget(
+            _consume_graph_events(
+                turn_id,
+                initial_state,
+                config,
+                started_at,
+                wait_ctx,
+                persist_tokens=persist_tokens,
+            ),
             active_timeout_sec=turn_timeout,
             is_paused=lambda: wait_ctx.waiting_approval,
         )
+        db_ms += graph_db_ms
 
         reply = final_state.get("final_reply")
         if reply is None:
@@ -253,8 +321,11 @@ async def _run_turn(
             logger.exception("写入异常降级事件失败 turn_id=%s", turn_id)
 
     latency_ms = _elapsed_ms(started_at)
+    llm_ms = int(final_state.get("llm_ms", 0) or 0)
+    tool_ms = int(final_state.get("tool_ms", 0) or 0)
     try:
         if not already_finalized:
+            t_save = time.monotonic()
             await asyncio.to_thread(save_message, session_id, "user", user_message)
             await asyncio.to_thread(
                 save_message,
@@ -264,15 +335,23 @@ async def _run_turn(
                 ",".join(tools_called) if tools_called else None,
                 latency_ms,
             )
+            db_ms += int((time.monotonic() - t_save) * 1000)
             payload: dict[str, Any] = {
                 "reply": reply,
                 "tools_called": tools_called,
                 "citations": citations,
                 "ttft_ms": ttft_ms,
                 "latency_ms": latency_ms,
+                "timing": {
+                    "llm_ms": llm_ms,
+                    "tool_ms": tool_ms,
+                    "db_ms": db_ms,
+                    "total_ms": latency_ms,
+                },
             }
             if final_type == "error":
                 payload["message"] = "Agent 处理请求时发生内部错误，请稍后重试。"
+            t_fin = time.monotonic()
             record = await asyncio.to_thread(
                 event_store.finish_turn,
                 turn_id,
@@ -286,6 +365,7 @@ async def _run_turn(
                 latency_ms,
                 error,
             )
+            db_ms += int((time.monotonic() - t_fin) * 1000)
             await wait_ctx.queue.put(record)
     except Exception:
         logger.exception("终态事件落库失败 turn_id=%s", turn_id)
@@ -295,8 +375,8 @@ async def _run_turn(
         _approval_waiters.pop(turn_id, None)
         _active_turn_ids.discard(turn_id)
         logger.info(
-            "turn 结束 turn_id=%s status=%s expired=%s tools=%s citations=%s ttft_ms=%s latency_ms=%d",
-            turn_id, status, already_finalized, tools_called, citations, ttft_ms, latency_ms,
+            "turn 结束 turn_id=%s status=%s expired=%s tools=%s citations=%s ttft_ms=%s llm_ms=%d tool_ms=%d db_ms=%d latency_ms=%d",
+            turn_id, status, already_finalized, tools_called, citations, ttft_ms, llm_ms, tool_ms, db_ms, latency_ms,
         )
     if cancelled:
         raise asyncio.CancelledError()
@@ -395,6 +475,7 @@ async def stream_agent(
     started_at: float | None = None,
     provider: BaseLLMProvider | None = None,
     auto_approve: bool = False,
+    persist_tokens: bool = True,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     流式执行一轮对话，逐条产出已落库的事件。
@@ -406,7 +487,16 @@ async def stream_agent(
 
     queue: "asyncio.Queue[dict[str, Any] | None]" = asyncio.Queue()
     task = asyncio.create_task(
-        _run_turn(turn_id, session_id, user_message, started_at, queue, provider, auto_approve)
+        _run_turn(
+            turn_id,
+            session_id,
+            user_message,
+            started_at,
+            queue,
+            provider,
+            auto_approve,
+            persist_tokens=persist_tokens,
+        )
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -426,7 +516,8 @@ async def arun_agent(
     auto_approve: bool = True,
 ) -> tuple[str, list[str], int, list[str]]:
     """
-    异步收集版：默认开启 auto_approve=True，保持 POST /api/chat 与 eval/run_eval.py 100% 兼容不中断。
+    异步收集版：默认开启 auto_approve=True，关闭逐字 token 落库（persist_tokens=False）
+    以消除同步 /api/chat 与并发评测期间的百次 SQLite 写锁争抢，保持契约 100% 兼容。
     """
     started_at = time.monotonic()
     final: dict[str, Any] | None = None
@@ -436,6 +527,7 @@ async def arun_agent(
         started_at=started_at,
         provider=provider,
         auto_approve=auto_approve,
+        persist_tokens=False,
     ):
         if event["type"] in ("done", "error"):
             final = event["data"]

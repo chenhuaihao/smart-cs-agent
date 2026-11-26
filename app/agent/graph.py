@@ -59,8 +59,22 @@ def merge_citations(left: list[str] | None, right: list[str] | None) -> list[str
     return merged
 
 
+# 需做间接提示注入数据围栏隔离的外部文本工具（知识库片段 / 含用户自由留言的历史工单）
+_FENCED_UNTRUSTED_TOOLS = {"search_knowledge_base", "query_tickets"}
+
+
+def _fence_tool_result(tool_name: str, raw_result: str) -> str:
+    """
+    将外部检索文档或历史工单用户留言包裹进不可信数据标签，防止间接提示注入指令被模型当成系统指令执行。
+    注意：证据账本与引用解析始终消费原始 raw_result，仅送入 LLM 的上下文消息加围栏。
+    """
+    if tool_name not in _FENCED_UNTRUSTED_TOOLS:
+        return raw_result
+    return f'<untrusted_tool_output tool="{tool_name}">\n{raw_result}\n</untrusted_tool_output>'
+
+
 class AgentState(TypedDict, total=False):
-    """图状态（含 P1 新增的 evidence_ledger、retry_count 与 fallback_reason）。"""
+    """图状态（含 P1 证据账本与 v3.0 分段耗时累计字段 llm_ms / tool_ms）。"""
 
     messages: Annotated[list[dict[str, Any]], operator.add]
     pending_tool_calls: list[dict[str, Any]]
@@ -72,6 +86,8 @@ class AgentState(TypedDict, total=False):
     retry_count: int
     verifier_passed: bool
     fallback_reason: str
+    llm_ms: Annotated[int, operator.add]
+    tool_ms: Annotated[int, operator.add]
 
 
 def extract_citation_details(tool_name: str, tool_result: str) -> list[dict[str, Any]]:
@@ -197,20 +213,24 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     step = steps + 1
     await adispatch_custom_event("stage", {"stage": "thinking", "step": step}, config=config)
 
+    llm_started = time.monotonic()
     try:
         text, tool_calls = await asyncio.wait_for(
             _consume_llm_stream(_get_provider(config), state["messages"], step, config),
             timeout=step_timeout,
         )
     except asyncio.TimeoutError:
-        logger.warning("agent_node 单步 LLM 超时 step=%d timeout=%ss", step, step_timeout)
+        step_llm_ms = int((time.monotonic() - llm_started) * 1000)
+        logger.warning("agent_node 单步 LLM 超时 step=%d timeout=%ss llm_ms=%d", step, step_timeout, step_llm_ms)
         return {
             "pending_tool_calls": [],
             "steps": step,
+            "llm_ms": step_llm_ms,
             "fallback_reason": f"大模型单步推理超时（>{step_timeout}s）",
         }
 
-    logger.info("agent_node step=%d text_len=%d tool_calls=%d", step, len(text), len(tool_calls))
+    step_llm_ms = int((time.monotonic() - llm_started) * 1000)
+    logger.info("agent_node step=%d text_len=%d tool_calls=%d llm_ms=%d", step, len(text), len(tool_calls), step_llm_ms)
 
     if tool_calls:
         assistant_msg = {
@@ -225,6 +245,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             "messages": [assistant_msg],
             "pending_tool_calls": [tc.model_dump() for tc in tool_calls],
             "steps": step,
+            "llm_ms": step_llm_ms,
             "fallback_reason": "",
         }
 
@@ -233,6 +254,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         "final_reply": text,
         "pending_tool_calls": [],
         "steps": step,
+        "llm_ms": step_llm_ms,
         "fallback_reason": "",
     }
 
@@ -259,6 +281,7 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]
     tool_messages: list[dict[str, Any]] = []
     names: list[str] = []
     new_citations: list[str] = []
+    batch_tool_ms = 0
 
     for call in calls:
         tool_name = call["name"]
@@ -300,6 +323,7 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]
             }
 
         duration_ms = int((time.monotonic() - started) * 1000)
+        batch_tool_ms += duration_ms
         names.append(tool_name)
 
         parsed = _safe_json(result)
@@ -348,7 +372,9 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]
             config=config,
         )
 
-        tool_messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+        tool_messages.append(
+            {"role": "tool", "tool_call_id": call["id"], "content": _fence_tool_result(tool_name, result)}
+        )
         logger.info("tool_node 完成 tool=%s status=%s duration_ms=%d", tool_name, not failed, duration_ms)
 
     return {
@@ -357,6 +383,7 @@ async def tool_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]
         "citations": new_citations,
         "evidence_ledger": current_ledger,
         "pending_tool_calls": [],
+        "tool_ms": batch_tool_ms,
     }
 
 

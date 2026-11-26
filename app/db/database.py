@@ -43,6 +43,8 @@ def get_db_connection() -> Generator[sqlite3.Connection, None, None]:
         # WAL 模式：写事务不阻塞读，SSE 流式写事件的同时，断线补发接口可以并发读取事件表。
         # journal_mode 是库文件级持久设置，已是 WAL 时再次执行为空操作，开销可忽略。
         conn.execute("PRAGMA journal_mode=WAL;")
+        # WAL 模式下官方推荐 synchronous=NORMAL（防进程崩溃不丢数据，大幅降低高频提交的 fsync 磁盘阻塞）
+        conn.execute("PRAGMA synchronous=NORMAL;")
         # busy_timeout：遇到写锁时最多等待 15 秒再报 database is locked，与上方 timeout 保持一致
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS};")
 
